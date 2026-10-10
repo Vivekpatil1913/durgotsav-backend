@@ -1,0 +1,114 @@
+import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+import sharp from "sharp";
+import { paths } from "../config/paths.js";
+import { badRequest } from "../utils/errors.js";
+
+const FOLDERS = new Set(["registrations", "forts", "content", "videos", "testimonials"]);
+
+// 64-bit difference hash: robust to resizing / recompression, so a re-uploaded copy of the same photo
+// lands within a few bits of the original (PDF §3.4, §6.5 — the same photo may not be reused).
+async function dhash(buffer) {
+  const pixels = await sharp(buffer).rotate().grayscale().resize(9, 8, { fit: "fill" }).raw().toBuffer();
+  let bits = "";
+  for (let y = 0; y < 8; y++) {
+    for (let x = 0; x < 8; x++) bits += pixels[y * 9 + x] > pixels[y * 9 + x + 1] ? "1" : "0";
+  }
+  return BigInt(`0b${bits}`).toString(16).padStart(16, "0");
+}
+
+export function hammingDistance(a, b) {
+  let x = BigInt(`0x${a}`) ^ BigInt(`0x${b}`);
+  let count = 0;
+  while (x) {
+    count += Number(x & 1n);
+    x >>= 1n;
+  }
+  return count;
+}
+
+async function readMetadata(buffer) {
+  try {
+    const meta = await sharp(buffer).metadata();
+    if (!["jpeg", "png", "webp"].includes(meta.format)) throw new Error("format");
+    return meta;
+  } catch {
+    // The browser-supplied MIME type said image, but the bytes are not a readable image
+    throw badRequest("The uploaded file is not a valid image", { photo: "Invalid image file" });
+  }
+}
+
+const name = () => `${Date.now().toString(36)}-${crypto.randomBytes(6).toString("hex")}`;
+
+/**
+ * Stores a participant photo:
+ *  - original bytes in storage/originals (private, kept as verification evidence)
+ *  - EXIF-stripped WebP display (≤1600px) and thumbnail (≤480px) under /uploads/registrations
+ */
+export async function storeParticipantPhoto(file) {
+  const meta = await readMetadata(file.buffer);
+  if ((meta.width || 0) < 300 || (meta.height || 0) < 300) {
+    throw badRequest("Photo is too small. Please upload a clear photo (at least 300×300 px)", { photo: "Photo too small" });
+  }
+  const id = name();
+  const month = new Date().toISOString().slice(0, 7);
+  const publicDir = path.join(paths.uploads, "registrations", month);
+  const privateDir = path.join(paths.privateStorage, month);
+  await Promise.all([fs.mkdir(publicDir, { recursive: true }), fs.mkdir(privateDir, { recursive: true })]);
+
+  const base = sharp(file.buffer, { failOn: "error" }).rotate(); // apply EXIF orientation, then metadata is dropped
+  const display = await base.clone().resize(1600, 1600, { fit: "inside", withoutEnlargement: true }).webp({ quality: 82 })
+    .toBuffer({ resolveWithObject: true });
+  const thumb = await base.clone().resize(480, 480, { fit: "inside", withoutEnlargement: true }).webp({ quality: 72 }).toBuffer();
+
+  const originalName = `${id}.${meta.format === "jpeg" ? "jpg" : meta.format}`;
+  await Promise.all([
+    fs.writeFile(path.join(privateDir, originalName), file.buffer),
+    fs.writeFile(path.join(publicDir, `${id}.webp`), display.data),
+    fs.writeFile(path.join(publicDir, `${id}_t.webp`), thumb),
+  ]);
+
+  return {
+    original_path: `${month}/${originalName}`,
+    image_path: `/uploads/registrations/${month}/${id}.webp`,
+    thumb_path: `/uploads/registrations/${month}/${id}_t.webp`,
+    width: display.info.width,
+    height: display.info.height,
+    size_bytes: file.size,
+    mime_type: file.mimetype,
+    sha256: crypto.createHash("sha256").update(file.buffer).digest("hex"),
+    dhash: await dhash(file.buffer),
+  };
+}
+
+// CMS images (fort covers, testimonials, video thumbnails): one WebP, ≤ 2000px.
+export async function storeContentImage(file, folder) {
+  if (!FOLDERS.has(folder)) throw badRequest("Unknown upload folder");
+  await readMetadata(file.buffer);
+  const dir = path.join(paths.uploads, folder);
+  await fs.mkdir(dir, { recursive: true });
+  const filename = `${name()}.webp`;
+  const out = await sharp(file.buffer).rotate().resize(2000, 2000, { fit: "inside", withoutEnlargement: true })
+    .webp({ quality: 84 }).toBuffer({ resolveWithObject: true });
+  await fs.writeFile(path.join(dir, filename), out.data);
+  return { url: `/uploads/${folder}/${filename}`, width: out.info.width, height: out.info.height };
+}
+
+// pdfkit embeds only JPEG/PNG — convert any stored public image to a small JPEG buffer.
+export async function loadAsJpeg(publicPath, size = 240) {
+  if (!publicPath?.startsWith("/uploads/")) return null;
+  const file = path.join(paths.uploads, publicPath.slice("/uploads/".length));
+  if (!file.startsWith(paths.uploads)) return null; // no path traversal
+  try {
+    return await sharp(file).resize(size, size, { fit: "cover" }).jpeg({ quality: 85 }).toBuffer();
+  } catch {
+    return null;
+  }
+}
+
+export async function removePublicFile(publicPath) {
+  if (!publicPath?.startsWith("/uploads/")) return;
+  const file = path.join(paths.uploads, publicPath.slice("/uploads/".length));
+  if (file.startsWith(paths.uploads)) await fs.unlink(file).catch(() => {});
+}

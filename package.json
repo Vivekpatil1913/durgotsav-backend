@@ -1,0 +1,45 @@
+{
+  "name": "durgotsav-2026-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Amrut Durgotsav 2026 REST API (Express + PostgreSQL)",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "nodemon --watch src --ext js,json src/server.js",
+    "start": "node src/server.js",
+    "db:create": "node scripts/db-create.js",
+    "db:migrate": "node scripts/migrate.js",
+    "db:seed": "node seeders/index.js",
+    "db:setup": "npm run db:create && npm run db:migrate && npm run db:seed",
+    "legacy:import": "node scripts/legacy-import.js",
+    "certificates:send-pending": "node scripts/send-pending-certificates.js",
+    "test": "node --test --test-concurrency=1 \"tests/**/*.test.js\""
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "compression": "^1.7.5",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.0.2",
+    "nodemailer": "^6.10.0",
+    "pdfkit": "^0.16.0",
+    "pg": "^8.13.1",
+    "pino": "^9.6.0",
+    "pino-http": "^10.4.0",
+    "sharp": "^0.33.5",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9",
+    "pino-pretty": "^13.0.0",
+    "supertest": "^7.0.0"
+  }
+}
