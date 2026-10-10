@@ -17,8 +17,8 @@ yarn-error.log*
 !.env.example
 
 # Runtime uploads & storage (user-generated files, not committed)
-# uploads/*
-# !uploads/.gitkeep
+uploads/*
+!uploads/.gitkeep
 storage/originals/*
 !storage/originals/.gitkeep
 
