@@ -1,6 +1,10 @@
 # Dependencies
 node_modules/
 
+# Test coverage
+coverage/
+.nyc_output/
+
 # Logs
 *.log
 npm-debug.log*
@@ -13,8 +17,8 @@ yarn-error.log*
 !.env.example
 
 # Runtime uploads & storage (user-generated files, not committed)
-uploads/*
-!uploads/.gitkeep
+# uploads/*
+# !uploads/.gitkeep
 storage/originals/*
 !storage/originals/.gitkeep
 
@@ -28,3 +32,8 @@ Thumbs.db
 
 # Claude Code
 .claude/
+
+# Caches
+.cache/
+.eslintcache
+*.tsbuildinfo

@@ -53,7 +53,7 @@ export const SETTINGS = {
     schema: z.object({ email: s(160), phone: s(30), whatsapp: s(20), address: s(500), address_en: s(500).optional(), hours: s(200).optional() }),
     initial: {
       email: "info@mahaamrut.org.in",
-      phone: "+91 91122 26154",
+      phone: "+91 97301 51450",
       whatsapp: "919112226154",
       address: "महाराष्ट्र संशोधन, उन्नती व प्रशिक्षण प्रबोधिनी (अमृत), महाराज सयाजीराव गायकवाड उद्योग भवन, पाचवा मजला, औंध, पुणे – ४११०६७",
       address_en: "Maharashtra Research, Upliftment and Training Academy (AMRUT), 5th Floor, Maharaj Sayajirao Gaekwad Industrial Estate, Aundh, Pune – 411067",
@@ -62,8 +62,15 @@ export const SETTINGS = {
   },
   social: {
     public: true,
-    schema: z.object({ instagram: link, youtube: link, facebook: link, x: link }),
-    initial: { instagram: "https://www.instagram.com/durgotsav2025", youtube: "", facebook: "", x: "" },
+    schema: z.object({ instagram: link, youtube: link, facebook: link, linkedin: link.optional(), google: link.optional(), x: link }),
+    initial: {
+      instagram: "https://www.instagram.com/mahaamrut_official",
+      facebook: "https://www.facebook.com/share/19FwaH93Lk/",
+      youtube: "https://youtube.com/@mahaamrutpune",
+      linkedin: "https://in.linkedin.com/in/academy-of-maharashtra-research-upliftment-and-training-718924289",
+      google: "https://share.google/ZinoE7EGsy6S4yzEE",
+      x: "",
+    },
   },
   seo: {
     public: true,
