@@ -70,6 +70,13 @@ reg.post("/photos/feature", validate({ body: featureSchema }), asyncHandler(asyn
 
 reg.get("/:id", validate({ params: idParams }), asyncHandler(async (req, res) => res.json({ data: await registrations.adminDetail(req.params.id) })));
 
+// Fresh short-lived link to a private S3 original (the one in the detail response may have expired)
+reg.get("/:id/photos/:photoId/original", validate({ params: idParams.extend({ photoId: z.coerce.number().int().positive() }) }),
+  asyncHandler(async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    res.json({ data: await registrations.photoOriginalUrl(req.params.id, req.params.photoId) });
+  }));
+
 reg.put("/:id", validate({ params: idParams, body: updateRegistrationSchema }), asyncHandler(async (req, res) => {
   const data = await registrations.update(req.params.id, req.body);
   audit(req, "update", "registration", req.params.id, { fields: Object.keys(req.body) });

@@ -28,6 +28,8 @@ export const registerSchema = z
     consent: z.literal("true", { errorMap: () => ({ message: "Please accept the rules to continue" }) }),
     // honeypot: real users never see or fill this field
     website: z.string().max(0, "Invalid submission").optional(),
+    // generated once per form fill; makes a retried submit idempotent
+    submission_id: z.preprocess((v) => (v === "" ? undefined : v), z.string().uuid("Invalid submission").optional()),
   })
   .superRefine((v, ctx) => {
     if (v.country === "India" && !v.district_id) {

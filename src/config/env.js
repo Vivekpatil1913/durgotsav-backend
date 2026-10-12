@@ -36,6 +36,18 @@ const schema = z.object({
   CONTACT_NOTIFY_EMAIL: z.string().optional().default(""),
 
   SMS_DRIVER: z.enum(["log"]).default("log"),
+
+  // Participant originals: "s3" (private bucket, EC2 instance role) or "local" (storage/originals, dev/tests)
+  PARTICIPANT_IMAGE_STORAGE: z.enum(["s3", "local"]).default("local"),
+  AWS_REGION: z.string().trim().default("ap-south-1"),
+  AWS_S3_BUCKET_NAME: z.string().trim().default(""),
+  AWS_S3_PRESIGNED_URL_EXPIRY_SECONDS: z.coerce.number().int().min(60).max(3600).default(300),
+}).superRefine((v, ctx) => {
+  if (v.PARTICIPANT_IMAGE_STORAGE !== "s3") return;
+  if (!v.AWS_REGION) ctx.addIssue({ code: "custom", path: ["AWS_REGION"], message: "Required when PARTICIPANT_IMAGE_STORAGE=s3" });
+  if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(v.AWS_S3_BUCKET_NAME)) {
+    ctx.addIssue({ code: "custom", path: ["AWS_S3_BUCKET_NAME"], message: "A valid bucket name is required when PARTICIPANT_IMAGE_STORAGE=s3" });
+  }
 });
 
 const parsed = schema.safeParse(process.env);

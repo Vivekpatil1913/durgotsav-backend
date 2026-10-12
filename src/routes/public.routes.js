@@ -87,8 +87,8 @@ router.get("/images", cache(30), validate({ query: pageQuery }), asyncHandler(as
 // ------------------------------------------------------------- registration (PDF §2, §3)
 router.post("/registrations", registerLimiter, imageUpload("photo"), validate({ body: registerSchema }),
   asyncHandler(async (req, res) => {
-    const result = await registrations.register(req.body, req.file, { ip: req.ip, userAgent: req.get("user-agent") });
-    res.status(201).json({ data: result });
+    const { replayed, ...result } = await registrations.register(req.body, req.file, { ip: req.ip, userAgent: req.get("user-agent") });
+    res.status(replayed ? 200 : 201).json({ data: result });
   }));
 
 router.get("/registrations/status", lookupLimiter, validate({ query: lookupSchema }),

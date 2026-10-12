@@ -17,9 +17,12 @@
     "db:setup": "npm run db:create && npm run db:migrate && npm run db:seed",
     "legacy:import": "node scripts/legacy-import.js",
     "certificates:send-pending": "node scripts/send-pending-certificates.js",
+    "s3:check": "node scripts/s3-check.js",
     "test": "node --test --test-concurrency=1 \"tests/**/*.test.js\""
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1149.0",
+    "@aws-sdk/s3-request-presigner": "^3.1149.0",
     "bcryptjs": "^2.4.3",
     "compression": "^1.7.5",
     "cors": "^2.8.5",

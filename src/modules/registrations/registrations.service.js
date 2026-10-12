@@ -1,5 +1,9 @@
+import { env } from "../../config/env.js";
 import { query, withTransaction } from "../../db/pool.js";
-import { storeParticipantPhoto } from "../../services/image.service.js";
+import { prepareParticipantPhoto, removeFiles, writeLocalOriginal, writePublicCopies } from "../../services/image.service.js";
+import { istDateFolder, participantFolderName, photoObjectKey } from "../../services/participant-photo-keys.js";
+import { deleteObject, ObjectExistsError, presignGetUrl, putObjectIfAbsent } from "../../services/s3.service.js";
+import { logger } from "../../utils/logger.js";
 import { badRequest, conflict, notFound, AppError } from "../../utils/errors.js";
 import { formatRegistrationNo, parseRegistrationNo } from "../../utils/format.js";
 import { paginate, pageMeta } from "../../utils/pagination.js";
@@ -46,6 +50,86 @@ async function assertReferences({ district_id, fort_id }) {
   if (!f.rowCount) throw badRequest("Please select a valid fort", { fort_id: "Invalid fort" });
 }
 
+// ---------------------------------------------------------------- photo storage
+
+// Next free "(n)" for an S3 original: continues after every photo already in the participant's folder for
+// today and every photo of this registration, so earlier uploads are never overwritten.
+async function uploadOriginalToS3(client, registration, prepared) {
+  const dateFolder = istDateFolder();
+  const folder = participantFolderName(registration.name, registration.phone);
+  const prefix = `${dateFolder}/${folder}/`;
+  // Serialise numbering per folder and per registration until this transaction ends
+  await client.query("SELECT pg_advisory_xact_lock(hashtext($1)), pg_advisory_xact_lock(hashtext($2))",
+    [`s3-folder:${prefix}`, `registration-photos:${registration.id}`]);
+  const { rows } = await client.query(
+    `SELECT COALESCE(MAX(photo_no), 0)::int AS n FROM registration_photos
+     WHERE starts_with(storage_key, $1) OR registration_id = $2`,
+    [prefix, registration.id],
+  );
+  // An object can exist without a row (e.g. a cleanup that failed); the conditional PUT skips past it.
+  for (let number = rows[0].n + 1, attempt = 0; ; number++, attempt++) {
+    const { key, fileName } = photoObjectKey({ dateFolder, folder, number, ext: prepared.ext });
+    try {
+      await putObjectIfAbsent({
+        key,
+        body: prepared.buffer,
+        contentType: prepared.content_type,
+        metadata: { "registration-id": String(registration.id), "photo-no": String(number), sha256: prepared.sha256 },
+      });
+      return { storage: "s3", storage_key: key, photo_no: number, file_name: fileName };
+    } catch (err) {
+      if (err instanceof ObjectExistsError && attempt < 20) continue;
+      throw err;
+    }
+  }
+}
+
+// Saves one prepared photo inside the caller's transaction: public WebP copies on disk, the original in S3
+// (or storage/originals when PARTICIPANT_IMAGE_STORAGE=local). Everything written is recorded in `written`
+// so discardWritten() can undo exactly this upload if the transaction does not commit.
+async function savePhoto(client, registration, prepared, written) {
+  const copies = await writePublicCopies(prepared);
+  written.files.push(...copies.files);
+  let original;
+  if (env.PARTICIPANT_IMAGE_STORAGE === "s3") {
+    original = await uploadOriginalToS3(client, registration, prepared);
+    written.keys.push(original.storage_key);
+  } else {
+    const local = await writeLocalOriginal(prepared);
+    written.files.push(local.file);
+    original = { storage: "local", original_path: local.original_path };
+  }
+  return {
+    ...original,
+    image_path: copies.image_path,
+    thumb_path: copies.thumb_path,
+    width: prepared.width,
+    height: prepared.height,
+    size_bytes: prepared.size_bytes,
+    mime_type: prepared.content_type,
+    original_name: prepared.original_name,
+    sha256: prepared.sha256,
+    dhash: prepared.dhash,
+  };
+}
+
+const newWritten = () => ({ files: [], keys: [] });
+
+async function discardWritten(written) {
+  await removeFiles(written.files);
+  for (const key of written.keys) {
+    // Only objects uploaded by this failed request are removed; earlier photos are never touched
+    await deleteObject(key).catch((err) => logger.error({ key, code: err.code }, "S3: could not remove an orphaned upload"));
+  }
+}
+
+async function findBySubmission(submissionId, phone) {
+  const { rows } = await query("SELECT id, phone, status, created_at FROM registrations WHERE submission_id = $1", [submissionId]);
+  if (!rows[0]) return null;
+  if (rows[0].phone !== phone) throw conflict("This form was already submitted. Please reload the page and try again", "SUBMISSION_REUSED");
+  return { id: rows[0].id, registration_no: formatRegistrationNo(rows[0].id), status: rows[0].status, created_at: rows[0].created_at, replayed: true };
+}
+
 // ---------------------------------------------------------------- public
 
 export async function register(input, file, meta) {
@@ -56,39 +140,59 @@ export async function register(input, file, meta) {
       details: window,
     });
   }
+  // A retried submit of the same form (e.g. network drop after the server saved it) returns the first result
+  if (input.submission_id) {
+    const existing = await findBySubmission(input.submission_id, input.phone);
+    if (existing) return existing;
+  }
   if (!file) throw badRequest("Please upload a photo of you with your fort replica", { photo: "Photo is required" });
   await assertReferences(input);
 
-  const photo = await storeParticipantPhoto(file);
-  return withTransaction(async (client) => {
-    const { rows } = await client.query(
-      `INSERT INTO registrations (participant_type, name, organization_name, phone, email, country, district_id, city,
-                                  fort_id, replica_notes, ip_address, user_agent)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id, status, created_at`,
-      [input.participant_type, input.name, input.organization_name ?? null, input.phone, input.email ?? null,
-        input.country || "India", input.country === "India" ? input.district_id : null, input.city ?? null,
-        input.fort_id ?? null, input.replica_notes ?? null, meta.ip, meta.userAgent?.slice(0, 300) ?? null],
-    );
-    const registration = rows[0];
-    const duplicateOf = await findDuplicatePhoto(client, photo, registration.id);
-    await insertPhoto(client, registration.id, photo, duplicateOf);
-    return {
-      id: registration.id,
-      registration_no: formatRegistrationNo(registration.id),
-      status: registration.status,
-      created_at: registration.created_at,
-    };
-  });
+  const prepared = await prepareParticipantPhoto(file);
+  const written = newWritten();
+  try {
+    return await withTransaction(async (client) => {
+      const { rows } = await client.query(
+        `INSERT INTO registrations (participant_type, name, organization_name, phone, email, country, district_id, city,
+                                    fort_id, replica_notes, ip_address, user_agent, submission_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id, status, created_at`,
+        [input.participant_type, input.name, input.organization_name ?? null, input.phone, input.email ?? null,
+          input.country || "India", input.country === "India" ? input.district_id : null, input.city ?? null,
+          input.fort_id ?? null, input.replica_notes ?? null, meta.ip, meta.userAgent?.slice(0, 300) ?? null,
+          input.submission_id ?? null],
+      );
+      const registration = rows[0];
+      const photo = await savePhoto(client, { id: registration.id, name: input.name, phone: input.phone }, prepared, written);
+      const duplicateOf = await findDuplicatePhoto(client, photo, registration.id);
+      await insertPhoto(client, registration.id, photo, duplicateOf);
+      return {
+        id: registration.id,
+        registration_no: formatRegistrationNo(registration.id),
+        status: registration.status,
+        created_at: registration.created_at,
+      };
+    });
+  } catch (err) {
+    await discardWritten(written);
+    // Two copies of the same submit raced: the other one committed, so answer with its registration
+    if (err.code === "23505" && err.constraint === "registrations_submission_id_key") {
+      const existing = await findBySubmission(input.submission_id, input.phone);
+      if (existing) return existing;
+    }
+    throw err;
+  }
 }
 
 async function insertPhoto(client, registrationId, photo, duplicateOf) {
   await client.query("UPDATE registration_photos SET is_current = FALSE WHERE registration_id = $1", [registrationId]);
   await client.query(
     `INSERT INTO registration_photos (registration_id, original_path, image_path, thumb_path, width, height,
-                                      size_bytes, mime_type, sha256, dhash, duplicate_of_photo_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-    [registrationId, photo.original_path, photo.image_path, photo.thumb_path, photo.width, photo.height,
-      photo.size_bytes, photo.mime_type, photo.sha256, photo.dhash, duplicateOf],
+                                      size_bytes, mime_type, sha256, dhash, duplicate_of_photo_id,
+                                      storage, storage_key, photo_no, original_name)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+    [registrationId, photo.original_path ?? null, photo.image_path, photo.thumb_path, photo.width, photo.height,
+      photo.size_bytes, photo.mime_type, photo.sha256, photo.dhash, duplicateOf,
+      photo.storage, photo.storage_key ?? null, photo.photo_no ?? null, photo.original_name ?? null],
   );
 }
 
@@ -123,14 +227,27 @@ export async function resubmit(registrationInput, { phone, replica_notes }, file
   const r = await findOwned(registrationInput, phone);
   if (r.status !== "info_requested") throw conflict("This registration is not waiting for more information", "NOT_AWAITING_INFO");
   if (!file && !replica_notes) throw badRequest("Please upload a new photo or add a note");
-  const photo = file ? await storeParticipantPhoto(file) : null;
-  await withTransaction(async (client) => {
-    if (photo) await insertPhoto(client, r.id, photo, await findDuplicatePhoto(client, photo, r.id));
-    await client.query(
-      `UPDATE registrations SET status = 'pending', replica_notes = COALESCE($2, replica_notes) WHERE id = $1`,
-      [r.id, replica_notes ?? null],
-    );
-  });
+  const prepared = file ? await prepareParticipantPhoto(file) : null;
+  const written = newWritten();
+  try {
+    await withTransaction(async (client) => {
+      // Row lock: two concurrent resubmits cannot both pass the status check
+      const { rowCount } = await client.query(
+        "SELECT 1 FROM registrations WHERE id = $1 AND status = 'info_requested' FOR UPDATE", [r.id]);
+      if (!rowCount) throw conflict("This registration is not waiting for more information", "NOT_AWAITING_INFO");
+      if (prepared) {
+        const photo = await savePhoto(client, { id: r.id, name: r.name, phone: r.phone }, prepared, written);
+        await insertPhoto(client, r.id, photo, await findDuplicatePhoto(client, photo, r.id));
+      }
+      await client.query(
+        `UPDATE registrations SET status = 'pending', replica_notes = COALESCE($2, replica_notes) WHERE id = $1`,
+        [r.id, replica_notes ?? null],
+      );
+    });
+  } catch (err) {
+    await discardWritten(written);
+    throw err;
+  }
   return publicStatus(r.id, phone);
 }
 
@@ -195,6 +312,7 @@ export async function adminDetail(id) {
     query(
       `SELECT p.id, p.image_path, p.thumb_path, p.width, p.height, p.size_bytes, p.is_current, p.is_featured,
               p.ai_score, p.created_at, p.duplicate_of_photo_id, dp.registration_id AS duplicate_of_registration_id,
+              p.storage, p.storage_key, p.photo_no, p.mime_type, p.original_name,
               dp.thumb_path AS duplicate_thumb_path
        FROM registration_photos p
        LEFT JOIN registration_photos dp ON dp.id = p.duplicate_of_photo_id
@@ -216,11 +334,35 @@ export async function adminDetail(id) {
   ]);
   return {
     ...decorate(rows[0]),
-    photos: photos.rows,
+    photos: await Promise.all(photos.rows.map(withOriginalUrl)),
     certificate: certificate.rows[0] ?? null,
     same_phone_registrations: samePhone.rows.map(decorate),
     history: history.rows,
   };
+}
+
+const originalFileName = (key) => key.split("/").pop();
+
+// Private S3 originals get a short-lived signed link; if S3 is unreachable the WebP copy still shows.
+async function withOriginalUrl(photo) {
+  if (photo.storage !== "s3" || !photo.storage_key) return { ...photo, original_url: null };
+  try {
+    const signed = await presignGetUrl(photo.storage_key, { filename: originalFileName(photo.storage_key) });
+    return { ...photo, original_url: signed.url, original_url_expires_at: signed.expires_at };
+  } catch (err) {
+    return { ...photo, original_url: null, original_error: err.code ?? "S3_UNAVAILABLE" };
+  }
+}
+
+// Fresh signed link for one original, checked against its registration (used once a link has expired)
+export async function photoOriginalUrl(registrationId, photoId) {
+  const { rows } = await query(
+    "SELECT storage, storage_key FROM registration_photos WHERE id = $1 AND registration_id = $2",
+    [photoId, registrationId],
+  );
+  if (!rows[0]) throw notFound("Photo not found");
+  if (rows[0].storage !== "s3" || !rows[0].storage_key) throw notFound("This photo's original is not stored in S3");
+  return presignGetUrl(rows[0].storage_key, { filename: originalFileName(rows[0].storage_key) });
 }
 
 const ACTION_STATUS = { verify: "verified", reject: "rejected", request_info: "info_requested", reset: "pending" };

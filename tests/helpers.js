@@ -13,6 +13,7 @@ process.env.REGISTRATION_FORCE_OPEN = "true";
 process.env.SEED_ADMIN_EMAIL = "admin@test.local";
 process.env.SEED_ADMIN_PASSWORD = "TestPassword123";
 process.env.SMTP_PASSWORD = ""; // never send real mail from tests
+process.env.PARTICIPANT_IMAGE_STORAGE = "local"; // never reach AWS; s3-storage.test.js switches to a fake S3
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 

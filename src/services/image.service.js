@@ -41,44 +41,90 @@ async function readMetadata(buffer) {
 
 const name = () => `${Date.now().toString(36)}-${crypto.randomBytes(6).toString("hex")}`;
 
+const FORMAT_MIME = { jpeg: "image/jpeg", png: "image/png", webp: "image/webp" };
+
 /**
- * Stores a participant photo:
- *  - original bytes in storage/originals (private, kept as verification evidence)
- *  - EXIF-stripped WebP display (≤1600px) and thumbnail (≤480px) under /uploads/registrations
+ * Validates a participant photo from its bytes (not the browser's MIME type or file name) and builds the
+ * EXIF-stripped WebP display (≤1600px) and thumbnail (≤480px) in memory. Nothing is written yet.
  */
-export async function storeParticipantPhoto(file) {
+export async function prepareParticipantPhoto(file) {
   const meta = await readMetadata(file.buffer);
   if ((meta.width || 0) < 300 || (meta.height || 0) < 300) {
     throw badRequest("Photo is too small. Please upload a clear photo (at least 300×300 px)", { photo: "Photo too small" });
   }
+  let display;
+  let thumb;
+  try {
+    const base = sharp(file.buffer, { failOn: "error" }).rotate(); // apply EXIF orientation, then metadata is dropped
+    display = await base.clone().resize(1600, 1600, { fit: "inside", withoutEnlargement: true }).webp({ quality: 82 })
+      .toBuffer({ resolveWithObject: true });
+    thumb = await base.clone().resize(480, 480, { fit: "inside", withoutEnlargement: true }).webp({ quality: 72 }).toBuffer();
+  } catch {
+    // Header parsed but the pixel data is truncated / corrupt
+    throw badRequest("The uploaded file is not a valid image", { photo: "Invalid image file" });
+  }
+  return {
+    buffer: file.buffer,
+    format: meta.format,
+    ext: meta.format === "jpeg" ? "jpg" : meta.format,
+    content_type: FORMAT_MIME[meta.format],
+    original_name: file.originalname ? String(file.originalname).slice(0, 255) : null,
+    display: display.data,
+    thumb,
+    width: display.info.width,
+    height: display.info.height,
+    size_bytes: file.size || file.buffer.length,
+    sha256: crypto.createHash("sha256").update(file.buffer).digest("hex"),
+    dhash: await dhash(file.buffer),
+  };
+}
+
+// Writes the public WebP copies. `files` lists the absolute paths so a failed registration can remove them.
+export async function writePublicCopies(prepared) {
   const id = name();
   const month = new Date().toISOString().slice(0, 7);
   const publicDir = path.join(paths.uploads, "registrations", month);
-  const privateDir = path.join(paths.privateStorage, month);
-  await Promise.all([fs.mkdir(publicDir, { recursive: true }), fs.mkdir(privateDir, { recursive: true })]);
-
-  const base = sharp(file.buffer, { failOn: "error" }).rotate(); // apply EXIF orientation, then metadata is dropped
-  const display = await base.clone().resize(1600, 1600, { fit: "inside", withoutEnlargement: true }).webp({ quality: 82 })
-    .toBuffer({ resolveWithObject: true });
-  const thumb = await base.clone().resize(480, 480, { fit: "inside", withoutEnlargement: true }).webp({ quality: 72 }).toBuffer();
-
-  const originalName = `${id}.${meta.format === "jpeg" ? "jpg" : meta.format}`;
-  await Promise.all([
-    fs.writeFile(path.join(privateDir, originalName), file.buffer),
-    fs.writeFile(path.join(publicDir, `${id}.webp`), display.data),
-    fs.writeFile(path.join(publicDir, `${id}_t.webp`), thumb),
-  ]);
-
+  await fs.mkdir(publicDir, { recursive: true });
+  const files = [path.join(publicDir, `${id}.webp`), path.join(publicDir, `${id}_t.webp`)];
+  await Promise.all([fs.writeFile(files[0], prepared.display), fs.writeFile(files[1], prepared.thumb)]);
   return {
-    original_path: `${month}/${originalName}`,
     image_path: `/uploads/registrations/${month}/${id}.webp`,
     thumb_path: `/uploads/registrations/${month}/${id}_t.webp`,
-    width: display.info.width,
-    height: display.info.height,
+    files,
+  };
+}
+
+// Original bytes in storage/originals (private, never served) — used when PARTICIPANT_IMAGE_STORAGE=local
+export async function writeLocalOriginal(prepared) {
+  const month = new Date().toISOString().slice(0, 7);
+  const privateDir = path.join(paths.privateStorage, month);
+  await fs.mkdir(privateDir, { recursive: true });
+  const fileName = `${name()}.${prepared.ext}`;
+  const file = path.join(privateDir, fileName);
+  await fs.writeFile(file, prepared.buffer);
+  return { original_path: `${month}/${fileName}`, file };
+}
+
+export const removeFiles = (files) => Promise.all(files.map((f) => fs.unlink(f).catch(() => {})));
+
+/**
+ * Stores a participant photo locally (legacy import):
+ *  - original bytes in storage/originals (private, kept as verification evidence)
+ *  - EXIF-stripped WebP display and thumbnail under /uploads/registrations
+ */
+export async function storeParticipantPhoto(file) {
+  const prepared = await prepareParticipantPhoto(file);
+  const [copies, original] = await Promise.all([writePublicCopies(prepared), writeLocalOriginal(prepared)]);
+  return {
+    original_path: original.original_path,
+    image_path: copies.image_path,
+    thumb_path: copies.thumb_path,
+    width: prepared.width,
+    height: prepared.height,
     size_bytes: file.size,
     mime_type: file.mimetype,
-    sha256: crypto.createHash("sha256").update(file.buffer).digest("hex"),
-    dhash: await dhash(file.buffer),
+    sha256: prepared.sha256,
+    dhash: prepared.dhash,
   };
 }
 
