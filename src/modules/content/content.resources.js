@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { query } from "../../db/pool.js";
 import { createCrud } from "../shared/crud.factory.js";
 import { bool, date, datetime, longText, sortOrder, text, url } from "../shared/fields.js";
 
@@ -32,6 +33,27 @@ export const videos = createCrud({
     description: longText(4000),
     youtube_url: z.string().trim().regex(YOUTUBE, "Enter a YouTube video link"),
     thumbnail: url(),
+    sort_order: sortOrder(),
+    is_active: bool(true),
+  }),
+});
+
+// Accepts a bare 11-char video id or any YouTube link and stores just the id
+const youtubeId = z.preprocess(
+  (v) => (typeof v === "string" ? (v.trim().match(/(?:youtu\.be\/|[?&]v=|embed\/|shorts\/)([\w-]{11})/)?.[1] ?? v.trim()) : v),
+  z.string().regex(/^[\w-]{11}$/, "Enter a YouTube link or 11-character video id"),
+);
+
+export const podcasts = createCrud({
+  table: "podcasts",
+  entity: "podcast",
+  searchable: ["title_mr", "title_en", "youtube_id"],
+  filters: { is_active: "bool" },
+  order: "sort_order ASC, id ASC",
+  schema: z.object({
+    youtube_id: youtubeId,
+    title_mr: text(300, { required: true }),
+    title_en: text(300, { required: true }),
     sort_order: sortOrder(),
     is_active: bool(true),
   }),
@@ -102,6 +124,62 @@ export const pages = createCrud({
     meta_description: text(300),
     is_active: bool(true),
   }),
+});
+
+export const divisions = createCrud({
+  table: "divisions",
+  entity: "division",
+  searchable: ["name_mr", "name_en"],
+  filters: { is_active: "bool" },
+  schema: z.object({
+    name_mr: text(80, { required: true }),
+    name_en: text(80, { required: true }),
+    sort_order: sortOrder(),
+    is_active: bool(true),
+  }),
+});
+
+export const districts = createCrud({
+  table: "districts",
+  entity: "district",
+  searchable: ["name_mr", "name_en", "division_name"],
+  filters: { is_active: "bool", division_id: "string" },
+  schema: z.object({
+    name_mr: text(80, { required: true }),
+    name_en: text(80, { required: true }),
+    division_id: z.coerce.number().int().positive({ message: "Please select a division" }),
+    sort_order: sortOrder(),
+    is_active: bool(true),
+  }),
+  beforeSave: async (data) => {
+    if (data.division_id) {
+      const { rows } = await query("SELECT name_en FROM divisions WHERE id = $1 AND deleted_at IS NULL", [data.division_id]);
+      if (rows[0]) data.division_name = rows[0].name_en;
+    }
+    return data;
+  },
+});
+
+export const talukas = createCrud({
+  table: "talukas",
+  entity: "taluka",
+  searchable: ["name_mr", "name_en", "district_name"],
+  filters: { is_active: "bool", district_id: "string" },
+  order: "district_id ASC, sort_order ASC, id ASC",
+  schema: z.object({
+    name_mr: text(100, { required: true }),
+    name_en: text(100, { required: true }),
+    district_id: z.coerce.number().int().positive({ message: "Please select a district" }),
+    sort_order: sortOrder(),
+    is_active: bool(true),
+  }),
+  beforeSave: async (data) => {
+    if (data.district_id) {
+      const { rows } = await query("SELECT name_en FROM districts WHERE id = $1 AND deleted_at IS NULL", [data.district_id]);
+      if (rows[0]) data.district_name = rows[0].name_en;
+    }
+    return data;
+  },
 });
 
 export const enquiries = createCrud({

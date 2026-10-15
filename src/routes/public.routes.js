@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { query } from "../db/pool.js";
 import { contactLimiter, lookupLimiter, registerLimiter } from "../middleware/rateLimit.js";
-import { imageUpload } from "../middleware/upload.js";
+import { imageUpload, imageUploadFields } from "../middleware/upload.js";
 import { validate } from "../middleware/validate.js";
 import { emailLayout, escapeHtml, sendMail } from "../services/mail.service.js";
 import { env } from "../config/env.js";
@@ -15,7 +15,7 @@ import * as galleryService from "../modules/gallery/gallery.service.js";
 import * as stats from "../modules/stats/stats.service.js";
 import { getPublicSettings } from "../modules/settings/settings.service.js";
 import { publicFortBySlug, publicFortList } from "../modules/forts/forts.module.js";
-import { announcements, events, faqs, testimonials, videos } from "../modules/content/content.resources.js";
+import { announcements, events, faqs, podcasts, testimonials, videos } from "../modules/content/content.resources.js";
 
 const router = Router();
 const optionalId = z.preprocess((v) => (v === "" ? undefined : v), z.coerce.number().int().positive().optional());
@@ -35,8 +35,24 @@ router.get("/health", asyncHandler(async (req, res) => {
 // ------------------------------------------------------------- site data
 router.get("/settings", cache(60), asyncHandler(async (req, res) => res.json({ data: await getPublicSettings() })));
 
+router.get("/divisions", cache(3600), asyncHandler(async (req, res) => {
+  const { rows } = await query(
+    "SELECT id, name_mr, name_en, sort_order FROM divisions WHERE deleted_at IS NULL AND is_active ORDER BY sort_order",
+  );
+  res.json({ data: rows });
+}));
+
 router.get("/districts", cache(3600), asyncHandler(async (req, res) => {
-  const { rows } = await query("SELECT id, name_mr, name_en FROM districts ORDER BY sort_order, name_mr");
+  const { rows } = await query(
+    "SELECT id, name_mr, name_en, division_id FROM districts WHERE deleted_at IS NULL ORDER BY sort_order, name_mr",
+  );
+  res.json({ data: rows });
+}));
+
+router.get("/talukas", cache(3600), asyncHandler(async (req, res) => {
+  const { rows } = await query(
+    "SELECT id, name_mr, name_en, district_id FROM talukas WHERE deleted_at IS NULL AND is_active ORDER BY district_id, sort_order",
+  );
   res.json({ data: rows });
 }));
 
@@ -62,6 +78,7 @@ router.get("/forts/:slug", cache(120), validate({ params: z.object({ slug: z.str
 
 router.get("/events", cache(120), asyncHandler(async (req, res) => res.json({ data: await events.service.listPublic() })));
 router.get("/videos", cache(120), asyncHandler(async (req, res) => res.json({ data: await videos.service.listPublic() })));
+router.get("/podcasts", cache(120), asyncHandler(async (req, res) => res.json({ data: await podcasts.service.listPublic() })));
 router.get("/testimonials", cache(300), asyncHandler(async (req, res) => res.json({ data: await testimonials.service.listPublic() })));
 router.get("/faqs", cache(300), asyncHandler(async (req, res) => res.json({ data: await faqs.service.listPublic() })));
 router.get("/announcements", cache(60), asyncHandler(async (req, res) =>
@@ -85,9 +102,10 @@ router.get("/gallery", cache(30), validate({ query: pageQuery.extend({ limit: z.
 router.get("/images", cache(30), validate({ query: pageQuery }), asyncHandler(async (req, res) => res.json(await galleryService.album(req.query))));
 
 // ------------------------------------------------------------- registration (PDF §2, §3)
-router.post("/registrations", registerLimiter, imageUpload("photo"), validate({ body: registerSchema }),
+router.post("/registrations", registerLimiter, imageUploadFields(["photo", "photo_2"]), validate({ body: registerSchema }),
   asyncHandler(async (req, res) => {
-    const { replayed, ...result } = await registrations.register(req.body, req.file, { ip: req.ip, userAgent: req.get("user-agent") });
+    const files = [req.files?.photo?.[0], req.files?.photo_2?.[0]];
+    const { replayed, ...result } = await registrations.register(req.body, files, { ip: req.ip, userAgent: req.get("user-agent") });
     res.status(replayed ? 200 : 201).json({ data: result });
   }));
 

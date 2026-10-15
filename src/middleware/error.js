@@ -13,7 +13,8 @@ export function errorHandler(err, req, res, next) {
     const message = err.code === "LIMIT_FILE_SIZE"
       ? `File must be ${env.UPLOAD_MAX_MB} MB or smaller`
       : err.message;
-    return res.status(400).json({ error: { code: err.code, message } });
+    // err.field names the upload field (photo / photo_2) so the form can mark the right one
+    return res.status(400).json({ error: { code: err.code, message, ...(err.field && { details: { [err.field]: message } }) } });
   }
   if (err?.type === "entity.parse.failed") {
     return res.status(400).json({ error: { code: "BAD_JSON", message: "Malformed JSON body" } });

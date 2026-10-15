@@ -7,7 +7,7 @@ const VERIFIED_PHOTOS = `
   JOIN registrations r ON r.id = p.registration_id AND r.status = 'verified' AND r.deleted_at IS NULL
   LEFT JOIN districts d ON d.id = r.district_id
   LEFT JOIN forts f ON f.id = r.fort_id
-  WHERE p.is_current`;
+  WHERE p.is_current AND p.position = 1`;
 
 const ITEM_COLUMNS = `p.id, p.image_path, p.thumb_path, p.width, p.height, r.name, r.participant_type,
   d.name_mr AS district, f.name_mr AS fort, f.slug AS fort_slug`;

@@ -14,9 +14,9 @@ const CERT_SELECT = `
   FROM certificates c
   JOIN registrations r ON r.id = c.registration_id
   LEFT JOIN districts d ON d.id = r.district_id
-  LEFT JOIN registration_photos p ON p.registration_id = r.id AND p.is_current`;
+  LEFT JOIN registration_photos p ON p.registration_id = r.id AND p.is_current AND p.position = 1`;
 
-// Called inside the review transaction. Re-verifying a revoked registration reinstates its certificate.
+// Called inside the review transaction for a single registration.
 export async function issue(client, registrationId, adminId) {
   await client.query(
     `INSERT INTO certificates (registration_id, certificate_no, issued_by)
@@ -25,6 +25,26 @@ export async function issue(client, registrationId, adminId) {
        SET revoked_at = NULL, revoked_by = NULL, revoke_reason = NULL,
            issued_at = CASE WHEN certificates.revoked_at IS NULL THEN certificates.issued_at ELSE NOW() END`,
     [registrationId, formatCertificateNo(registrationId), adminId],
+  );
+}
+
+// Bulk version: one INSERT … ON CONFLICT for all ids in a batch review.
+// Avoids N sequential round-trips inside the transaction for large bulk verifies.
+export async function issueBatch(client, registrationIds, adminId) {
+  if (!registrationIds.length) return;
+  const certNos = registrationIds.map(formatCertificateNo);
+  await client.query(
+    `INSERT INTO certificates (registration_id, certificate_no, issued_by)
+     SELECT unnested.reg_id, unnested.cert_no, $3
+     FROM UNNEST($1::int[], $2::text[]) AS unnested(reg_id, cert_no)
+     ON CONFLICT (registration_id) DO UPDATE
+       SET revoked_at  = NULL,
+           revoked_by  = NULL,
+           revoke_reason = NULL,
+           issued_at   = CASE WHEN certificates.revoked_at IS NULL
+                              THEN certificates.issued_at
+                              ELSE NOW() END`,
+    [registrationIds, certNos, adminId],
   );
 }
 
@@ -86,11 +106,20 @@ export async function notify(registrationId) {
   return result;
 }
 
-// Sends sequentially in the background so admin requests return immediately.
+// Sends notifications in the background so admin requests return immediately.
+// Runs CONCURRENCY notifications at a time to balance throughput against SMTP
+// connection limits. Sequential processing of 1000s of IDs would take hours;
+// fully parallel would hammer the mail server — batched concurrent is the sweet spot.
+const NOTIFY_CONCURRENCY = 5;
+
 export function notifyInBackground(registrationIds) {
   if (!registrationIds.length || env.isTest) return;
   (async () => {
-    for (const id of registrationIds) await notify(id);
+    for (let i = 0; i < registrationIds.length; i += NOTIFY_CONCURRENCY) {
+      await Promise.allSettled(
+        registrationIds.slice(i, i + NOTIFY_CONCURRENCY).map(notify),
+      );
+    }
   })().catch((err) => logger.error({ err }, "Background certificate notifications failed"));
 }
 

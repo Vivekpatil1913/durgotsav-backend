@@ -2,7 +2,8 @@ import { z } from "zod";
 import { paginationSchema } from "../../utils/pagination.js";
 
 export const PARTICIPANT_TYPES = ["individual", "family", "housing_society", "organization", "group", "school", "college"];
-export const STATUSES = ["pending", "info_requested", "verified", "rejected"];
+export const STATUSES = ["pending", "info_requested", "verified", "rejected", "duplicate"];
+export const REVIEW_ACTIONS = ["verify", "reject", "request_info", "mark_duplicate", "reset"];
 
 const trimmed = (max) => z.string().trim().max(max);
 const optionalText = (max) =>
@@ -22,9 +23,14 @@ export const registerSchema = z
     email: z.preprocess((v) => (v === "" ? undefined : v), z.string().trim().toLowerCase().email("Email is invalid").max(160).optional()),
     country: optionalText(80).default("India"),
     district_id: optionalId,
+    taluka_id: optionalId,
     city: optionalText(120),
     fort_id: optionalId,
-    replica_notes: optionalText(500),
+    // optional; when given, 2–300 characters (matches the registration form)
+    replica_notes: z.preprocess(
+      (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+      trimmed(300).min(2, "Please write at least 2 characters").optional(),
+    ),
     consent: z.literal("true", { errorMap: () => ({ message: "Please accept the rules to continue" }) }),
     // honeypot: real users never see or fill this field
     website: z.string().max(0, "Invalid submission").optional(),
@@ -56,7 +62,9 @@ const boolish = z.enum(["true", "false"]).transform((v) => v === "true").optiona
 export const adminListSchema = paginationSchema.extend({
   q: optionalText(100),
   status: z.enum(STATUSES).optional(),
+  division_id: optionalId,
   district_id: optionalId,
+  taluka_id: optionalId,
   fort_id: optionalId,
   participant_type: z.enum(PARTICIPANT_TYPES).optional(),
   from: z.string().date().optional(),
@@ -69,7 +77,7 @@ export const adminListSchema = paginationSchema.extend({
 
 export const reviewSchema = z
   .object({
-    action: z.enum(["verify", "reject", "request_info", "reset"]),
+    action: z.enum(REVIEW_ACTIONS),
     note: optionalText(500),
   })
   .superRefine((v, ctx) => {
@@ -80,7 +88,7 @@ export const reviewSchema = z
 
 export const bulkReviewSchema = z.object({
   ids: z.array(z.coerce.number().int().positive()).min(1).max(200),
-  action: z.enum(["verify", "reject", "request_info", "reset"]),
+  action: z.enum(REVIEW_ACTIONS),
   note: optionalText(500),
 });
 

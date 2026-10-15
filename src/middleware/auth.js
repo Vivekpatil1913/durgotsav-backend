@@ -6,7 +6,9 @@ import { forbidden, unauthorized } from "../utils/errors.js";
 export const signToken = (admin) =>
   jwt.sign({ sub: admin.id, role: admin.role }, env.JWT_SECRET, { expiresIn: env.JWT_EXPIRES_IN });
 
-// Verifies the bearer token and re-reads the admin so deactivated/deleted accounts lose access immediately.
+// Verifies the bearer token and re-reads the admin from DB on every request.
+// This catches deactivated accounts immediately and loads the current role + permissions
+// so revoking a permission takes effect on the next request without forcing a re-login.
 export async function authenticate(req, res, next) {
   try {
     const header = req.headers.authorization || "";
@@ -19,7 +21,14 @@ export async function authenticate(req, res, next) {
       throw unauthorized("Session expired, please log in again");
     }
     const { rows } = await query(
-      "SELECT id, name, email, role FROM admins WHERE id = $1 AND is_active AND deleted_at IS NULL",
+      `SELECT a.id, a.name, a.email, a.role, a.role_id,
+              r.name  AS role_name,
+              r.slug  AS role_slug,
+              r.is_admin,
+              r.permissions AS role_permissions
+       FROM   admins a
+       JOIN   roles  r ON r.id = a.role_id
+       WHERE  a.id = $1 AND a.is_active AND a.deleted_at IS NULL AND r.deleted_at IS NULL`,
       [payload.sub],
     );
     if (!rows[0]) throw unauthorized("Account is no longer active");
@@ -30,9 +39,10 @@ export async function authenticate(req, res, next) {
   }
 }
 
-// super_admin passes every check; otherwise the role must be listed.
+// Legacy guard: super_admin passes; otherwise role must be in the list.
+// Kept for existing routes; new routes should prefer checkPermission() from permission.js.
 export const authorize = (...roles) => (req, res, next) => {
   if (!req.admin) return next(unauthorized());
-  if (req.admin.role === "super_admin" || roles.includes(req.admin.role)) return next();
+  if (req.admin.is_admin || roles.includes(req.admin.role)) return next();
   next(forbidden());
 };

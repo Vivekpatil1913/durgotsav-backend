@@ -15,3 +15,15 @@ export const imageUpload = (field, { maxMb = env.UPLOAD_MAX_MB } = {}) =>
         ? cb(null, true)
         : cb(badRequest("Only JPG, PNG or WebP images are allowed", { [field]: "Unsupported file type" })),
   }).single(field);
+
+// Several named single-file fields in one request, e.g. imageUploadFields(["photo", "photo_2"]).
+// Each lands in req.files[name][0]; a field can be sent at most once.
+export const imageUploadFields = (fields, { maxMb = env.UPLOAD_MAX_MB } = {}) =>
+  multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: maxMb * 1024 * 1024, files: fields.length, fields: 30 },
+    fileFilter: (req, file, cb) =>
+      ALLOWED.has(file.mimetype)
+        ? cb(null, true)
+        : cb(badRequest("Only JPG, PNG or WebP images are allowed", { [file.fieldname]: "Unsupported file type" })),
+  }).fields(fields.map((name) => ({ name, maxCount: 1 })));
