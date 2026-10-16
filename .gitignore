@@ -16,11 +16,11 @@ yarn-error.log*
 .env.*
 !.env.example
 
-# Runtime uploads & storage (user-generated files, not committed)
-uploads/*
-!uploads/.gitkeep
+# Private storage (EXIF/GPS originals, award evidence) — not committed.
+# uploads/ (public site images) IS committed so the server gets the same images.
 storage/originals/*
 !storage/originals/.gitkeep
+storage/award-documents/
 
 # Editor
 .vscode/

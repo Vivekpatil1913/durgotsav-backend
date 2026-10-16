@@ -28,8 +28,10 @@ async function seedAdmin() {
   let password = process.env.SEED_ADMIN_PASSWORD;
   const generated = !password;
   if (generated) password = `Dgt26-${crypto.randomBytes(9).toString("base64url")}`;
-  await pool.query("INSERT INTO admins (name, email, password_hash, role) VALUES ($1, $2, $3, 'super_admin')", [
-    process.env.SEED_ADMIN_NAME || "Super Admin", email, await bcrypt.hash(password, 12),
+  const roleRes = await pool.query("SELECT id FROM roles WHERE slug = 'super_admin' LIMIT 1");
+  const roleId = roleRes.rows[0]?.id ?? 1;
+  await pool.query("INSERT INTO admins (name, email, password_hash, role, role_id) VALUES ($1, $2, $3, 'super_admin', $4)", [
+    process.env.SEED_ADMIN_NAME || "Super Admin", email, await bcrypt.hash(password, 12), roleId,
   ]);
   console.log(`• super admin created: ${email}`);
   if (generated) console.log(`  generated password (shown once, change it after login): ${password}`);

@@ -1,6 +1,7 @@
 // Test bootstrap: points the app at a throw-away database, rebuilt from migrations + seeders on every run.
 import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import "dotenv/config";
@@ -13,6 +14,7 @@ process.env.REGISTRATION_FORCE_OPEN = "true";
 process.env.SEED_ADMIN_EMAIL = "admin@test.local";
 process.env.SEED_ADMIN_PASSWORD = "TestPassword123";
 process.env.SMTP_PASSWORD = ""; // never send real mail from tests
+process.env.AWARD_DOCUMENTS_DIR = path.join(os.tmpdir(), "durgotsav-award-test-documents"); // never mix test files with real evidence
 process.env.PARTICIPANT_IMAGE_STORAGE = "local"; // never reach AWS; s3-storage.test.js switches to a fake S3
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");

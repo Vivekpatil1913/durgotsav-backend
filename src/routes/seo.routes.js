@@ -10,6 +10,7 @@ const STATIC_ROUTES = [
   ["/about", "monthly", "0.8"],
   ["/forts", "weekly", "0.9"],
   ["/participate", "weekly", "0.9"],
+  ["/shivdurg-bhushan-puraskar-2026", "weekly", "0.9"],
   ["/certificate", "monthly", "0.7"],
   ["/gallery", "daily", "0.8"],
   ["/album", "daily", "0.7"],

@@ -30,3 +30,7 @@ export const registerLimiter = make(60,  15, "Too many registrations from this n
 // Certificate/status lookups need registration no + mobile; this stops mobile-number guessing
 export const lookupLimiter   = make(15,  40, "Too many lookups. Try again in a few minutes");
 export const contactLimiter  = make(60,   8, "Too many messages. Try again later");
+// Award nominations carry several files each; a real nominator submits a handful at most
+export const nominationLimiter = make(60, 10, "Too many nominations from this network. Try again later");
+// One visit per tab session; this only stops a script from inflating the visitor counter
+export const visitLimiter    = make(60,  30, "Too many requests. Try again later");

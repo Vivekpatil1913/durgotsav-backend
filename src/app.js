@@ -9,6 +9,7 @@ import { paths } from "./config/paths.js";
 import { errorHandler, notFoundHandler } from "./middleware/error.js";
 import { apiLimiter } from "./middleware/rateLimit.js";
 import { authRouter } from "./modules/auth/auth.module.js";
+import { publicAwardRouter } from "./modules/award/award.routes.js";
 import adminRoutes from "./routes/admin.routes.js";
 import legacyRoutes from "./routes/legacy.routes.js";
 import publicRoutes from "./routes/public.routes.js";
@@ -42,6 +43,7 @@ export function createApp() {
   app.use("/api", apiLimiter);
   app.use("/api/auth", authRouter);
   app.use("/api/admin", adminRoutes);
+  app.use("/api/shivdurg-award", publicAwardRouter);
   app.use("/api", publicRoutes);
   app.use(seoRoutes);
   app.use(legacyRoutes);

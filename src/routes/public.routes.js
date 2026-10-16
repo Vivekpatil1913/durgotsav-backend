@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { query } from "../db/pool.js";
-import { contactLimiter, lookupLimiter, registerLimiter } from "../middleware/rateLimit.js";
+import { contactLimiter, lookupLimiter, registerLimiter, visitLimiter } from "../middleware/rateLimit.js";
 import { imageUpload, imageUploadFields } from "../middleware/upload.js";
 import { validate } from "../middleware/validate.js";
 import { emailLayout, escapeHtml, sendMail } from "../services/mail.service.js";
@@ -13,6 +13,7 @@ import { lookupSchema, registerSchema, resubmitSchema } from "../modules/registr
 import * as certificates from "../modules/certificates/certificates.service.js";
 import * as galleryService from "../modules/gallery/gallery.service.js";
 import * as stats from "../modules/stats/stats.service.js";
+import * as visits from "../modules/stats/visits.service.js";
 import { getPublicSettings } from "../modules/settings/settings.service.js";
 import { publicFortBySlug, publicFortList } from "../modules/forts/forts.module.js";
 import { announcements, events, faqs, podcasts, testimonials, videos } from "../modules/content/content.resources.js";
@@ -57,6 +58,18 @@ router.get("/talukas", cache(3600), asyncHandler(async (req, res) => {
 }));
 
 router.get("/stats", cache(30), asyncHandler(async (req, res) => res.json({ data: await stats.publicStats() })));
+
+// ------------------------------------------------------------- visitor counter
+router.get("/visits", asyncHandler(async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.json({ data: await visits.visitTotals() });
+}));
+const visitSchema = z.object({ visitor_id: z.string().uuid().optional() });
+router.post("/visits", visitLimiter, validate({ body: visitSchema }), asyncHandler(async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  const visitor = { visitorId: req.body.visitor_id, ip: req.ip, userAgent: req.get("user-agent") };
+  res.json({ data: await visits.recordVisit(visitor) });
+}));
 
 router.get("/home", cache(60), asyncHandler(async (req, res) => {
   // One round-trip for the home page

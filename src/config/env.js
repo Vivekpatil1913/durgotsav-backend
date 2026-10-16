@@ -26,6 +26,10 @@ const schema = z.object({
   ALBUM_PAGE_SIZE: z.coerce.number().int().min(1).max(100).default(20),
   UPLOAD_MAX_MB: z.coerce.number().min(1).max(25).default(8),
   REGISTRATION_FORCE_OPEN: bool,
+  // Shivdurg Bhushan award: true = accept nominations regardless of the configured window (local testing only)
+  AWARD_FORCE_OPEN: bool,
+  // Award evidence files: "local" (storage/award-documents) or "s3" (AWS_S3_BUCKET_NAME, prefix shivdurg-bhushan/)
+  AWARD_DOCUMENT_STORAGE: z.enum(["s3", "local"]).default("local"),
 
   SMTP_HOST: z.string().optional().default(""),
   SMTP_PORT: z.coerce.number().default(587),
@@ -43,10 +47,10 @@ const schema = z.object({
   AWS_S3_BUCKET_NAME: z.string().trim().default(""),
   AWS_S3_PRESIGNED_URL_EXPIRY_SECONDS: z.coerce.number().int().min(60).max(3600).default(300),
 }).superRefine((v, ctx) => {
-  if (v.PARTICIPANT_IMAGE_STORAGE !== "s3") return;
-  if (!v.AWS_REGION) ctx.addIssue({ code: "custom", path: ["AWS_REGION"], message: "Required when PARTICIPANT_IMAGE_STORAGE=s3" });
+  if (v.PARTICIPANT_IMAGE_STORAGE !== "s3" && v.AWARD_DOCUMENT_STORAGE !== "s3") return;
+  if (!v.AWS_REGION) ctx.addIssue({ code: "custom", path: ["AWS_REGION"], message: "Required when S3 storage is enabled" });
   if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(v.AWS_S3_BUCKET_NAME)) {
-    ctx.addIssue({ code: "custom", path: ["AWS_S3_BUCKET_NAME"], message: "A valid bucket name is required when PARTICIPANT_IMAGE_STORAGE=s3" });
+    ctx.addIssue({ code: "custom", path: ["AWS_S3_BUCKET_NAME"], message: "A valid bucket name is required when S3 storage is enabled" });
   }
 });
 

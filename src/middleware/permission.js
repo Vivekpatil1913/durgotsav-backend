@@ -18,6 +18,7 @@ export const checkPermission = (moduleKey, level = "read") =>
 export const checkExplicitPermission = (moduleKey, level = "read") =>
   (req, res, next) => {
     if (!req.admin) return next(unauthorized());
+    if (req.admin.is_admin && req.admin.role_permissions?.[moduleKey]?.read !== false) return next();
     if (!canDo(req.admin.role_permissions, moduleKey, level)) return next(forbidden());
     next();
   };

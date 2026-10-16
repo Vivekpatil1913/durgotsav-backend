@@ -5,7 +5,7 @@ import sharp from "sharp";
 import { paths } from "../config/paths.js";
 import { badRequest } from "../utils/errors.js";
 
-const FOLDERS = new Set(["registrations", "forts", "content", "videos", "testimonials"]);
+const FOLDERS = new Set(["registrations", "forts", "content", "videos", "testimonials", "awards"]);
 
 // 64-bit difference hash: robust to resizing / recompression, so a re-uploaded copy of the same photo
 // lands within a few bits of the original (PDF §3.4, §6.5 — the same photo may not be reused).

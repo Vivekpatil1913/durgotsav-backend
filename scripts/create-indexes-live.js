@@ -90,6 +90,30 @@ const STEPS = [
     sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_logs_action_text_idx
           ON audit_logs (action text_pattern_ops)`,
   },
+  // अमृत शिवदुर्ग भूषण पुरस्कार nominations — mirrors migrations/017_award_scale_indexes.sql
+  ...[
+    ["award_nominations_name_trgm", "award_nominations USING GIN (nominee_name gin_trgm_ops)", "nominee search"],
+    ["award_nominations_email_trgm", "award_nominations USING GIN (email gin_trgm_ops)", "email search"],
+    ["award_nominations_ref_trgm", "award_nominations USING GIN (reference_no gin_trgm_ops)", "reference search"],
+    ["award_nominations_mobile_trgm", "award_nominations USING GIN (mobile gin_trgm_ops)", "mobile search"],
+    ["award_nominators_name_trgm", "award_nominators USING GIN (full_name gin_trgm_ops)", "nominator search"],
+    ["award_nominators_mobile_trgm", "award_nominators USING GIN (mobile gin_trgm_ops)", "nominator mobile search"],
+    ["award_nominations_ref_upper_idx", "award_nominations (upper(reference_no))", "public status lookup"],
+    ["award_nominations_list_idx", "award_nominations (edition_id, submitted_at DESC, id DESC)", "list, newest first"],
+    ["award_nominations_status_idx", "award_nominations (edition_id, status, submitted_at DESC, id DESC)", "status filter"],
+    ["award_nominations_category_idx", "award_nominations (edition_id, category, submitted_at DESC, id DESC)", "category filter"],
+    ["award_nominations_district_idx", "award_nominations (edition_id, district_id, submitted_at DESC, id DESC)", "district filter"],
+    ["award_nominations_taluka_idx", "award_nominations (edition_id, taluka_id, submitted_at DESC, id DESC)", "taluka filter"],
+    ["award_nominations_name_idx", "award_nominations (edition_id, nominee_name, id)", "sort by name"],
+    ["award_nominations_edition_id_idx", "award_nominations (edition_id, id)", "sort by reference"],
+  ].map(([name, on, what]) => ({
+    label: `${name} (award — ${what})`,
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS ${name} ON ${on}`,
+  })),
+  ...["idx_award_nominations_list", "idx_award_nominations_status", "idx_award_nominations_category"].map((name) => ({
+    label: `drop ${name} (superseded)`,
+    sql: `DROP INDEX CONCURRENTLY IF EXISTS ${name}`,
+  })),
 ];
 
 const ANALYZE = [
@@ -97,6 +121,8 @@ const ANALYZE = [
   "ANALYZE registration_photos",
   "ANALYZE certificates",
   "ANALYZE audit_logs",
+  "ANALYZE award_nominations",
+  "ANALYZE award_nominators",
 ];
 
 const pad = (s, n) => s.padEnd(n, " ");

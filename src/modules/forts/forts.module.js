@@ -122,7 +122,8 @@ export async function publicFortBySlug(slug) {
        JOIN registrations r ON r.id = p.registration_id
        LEFT JOIN districts d ON d.id = r.district_id
        WHERE r.fort_id = $1 AND r.status = 'verified' AND r.deleted_at IS NULL AND p.is_current AND p.position = 1
-       ORDER BY p.is_featured DESC, p.id DESC LIMIT 12`,
+         AND p.is_featured
+       ORDER BY p.id DESC LIMIT 12`,
       [rows[0].id],
     ),
   ]);

@@ -29,6 +29,7 @@ const boolish = z.enum(["true", "false"]).transform((v) => v === "true").optiona
  * @param {boolean} [cfg.hasSortOrder=true]
  * @param {string[]} [cfg.actions]          subset of list,get,create,update,toggle,delete,restore,reorder
  * @param {string[]} [cfg.roles]            roles allowed (super_admin always allowed)
+ * @param {Function} [cfg.guard]            access middleware used instead of the legacy role check (e.g. checkPermission)
  * @param {(data:object)=>object|Promise<object>} [cfg.beforeSave]
  */
 export function createCrud(cfg) {
@@ -135,7 +136,7 @@ export function createCrud(cfg) {
 
   const router = Router();
   const can = (a) => actions.includes(a);
-  router.use(authorize(...roles));
+  router.use(cfg.guard ?? authorize(...roles));
 
   if (can("list")) {
     router.get("/", validate({ query: listSchema }), asyncHandler(async (req, res) => res.json(await service.list(req.query))));

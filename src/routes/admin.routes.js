@@ -12,11 +12,13 @@ import { formatRegistrationNo } from "../utils/format.js";
 import { paginate, pageMeta, paginationSchema } from "../utils/pagination.js";
 import { adminsRouter } from "../modules/auth/auth.module.js";
 import { rbacRouter } from "../modules/rbac/rbac.module.js";
+import { adminAwardRouter } from "../modules/award/award.routes.js";
 import * as registrations from "../modules/registrations/registrations.service.js";
 import {
   adminListSchema, bulkReviewSchema, featureSchema, reviewSchema, updateRegistrationSchema,
 } from "../modules/registrations/registrations.schemas.js";
 import * as certificates from "../modules/certificates/certificates.service.js";
+import * as galleryService from "../modules/gallery/gallery.service.js";
 import * as stats from "../modules/stats/stats.service.js";
 import { getAllSettings, updateSettings } from "../modules/settings/settings.service.js";
 import { settingsUpdateSchema } from "../modules/settings/settings.definitions.js";
@@ -242,6 +244,73 @@ cert.post("/:id/reinstate",
   }));
 router.use("/certificates", cert);
 
+// ------------------------------------------------------------- website gallery
+const websiteGallery = Router();
+websiteGallery.use(scopeToAdminDivisions);
+
+const websiteGalleryQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  display_status: z.enum(["all", "selected", "unselected", "featured", "not_featured"]).default("all"),
+  division_id: z.preprocess((v) => (v === "" ? undefined : v), z.coerce.number().int().positive().optional()),
+  district_id: z.preprocess((v) => (v === "" ? undefined : v), z.coerce.number().int().positive().optional()),
+  taluka_id: z.preprocess((v) => (v === "" ? undefined : v), z.coerce.number().int().positive().optional()),
+  fort_id: z.preprocess((v) => (v === "" ? undefined : v), z.coerce.number().int().positive().optional()),
+  sort: z.enum(["newest", "oldest", "name", "display_first", "display_last"]).default("newest"),
+  q: z.string().trim().max(100).optional(),
+});
+
+websiteGallery.get("/",
+  checkPermission("website_gallery", "read"),
+  validate({ query: websiteGalleryQuerySchema }),
+  asyncHandler(async (req, res) => {
+    res.json({ data: await galleryService.adminListVerifiedPhotos(req.query, req.allowedDivisionIds) });
+  }));
+
+websiteGallery.post("/toggle",
+  checkPermission("website_gallery", "write"),
+  validate({
+    body: z.object({
+      photo_id: z.coerce.number().int().positive(),
+      featured: z.boolean(),
+    }),
+  }),
+  asyncHandler(async (req, res) => {
+    const updated = await galleryService.setWebsiteGalleryDisplay(
+      [req.body.photo_id], req.body.featured, req.allowedDivisionIds,
+    );
+    audit(req, req.body.featured ? "website_gallery_add" : "website_gallery_remove", "photo", req.body.photo_id, {
+      featured: req.body.featured,
+    });
+    res.json({ data: { updated: updated.length > 0, photo_id: req.body.photo_id, featured: req.body.featured } });
+  }));
+
+websiteGallery.post("/bulk",
+  checkPermission("website_gallery", "write"),
+  checkExplicitPermission("website_gallery_bulk"),
+  validate({
+    body: z.object({
+      photo_ids: z.array(z.coerce.number().int().positive()).min(1).max(500),
+      featured: z.boolean(),
+    }),
+  }),
+  asyncHandler(async (req, res) => {
+    const updated = await galleryService.setWebsiteGalleryDisplay(
+      req.body.photo_ids, req.body.featured, req.allowedDivisionIds,
+    );
+    audit(req, req.body.featured ? "website_gallery_bulk_add" : "website_gallery_bulk_remove", "photo", null, {
+      count: updated.length,
+      featured: req.body.featured,
+      photo_ids: updated,
+    });
+    res.json({ data: { updated, count: updated.length, skipped: req.body.photo_ids.length - updated.length } });
+  }));
+
+router.use("/website-gallery", websiteGallery);
+
+// ------------------------------------------------------------- शिवदुर्ग भूषण पुरस्कार
+router.use("/shivdurg-award", adminAwardRouter);
+
 // ------------------------------------------------------------- RBAC (roles + division grants)
 router.use("/rbac", rbacRouter);
 
@@ -263,8 +332,9 @@ router.use("/admins",        adminsRouter);
 
 // Generic CMS image upload
 router.post("/uploads",
-  checkPermission("forts", "write"),
-  validate({ query: z.object({ folder: z.enum(["forts", "content", "videos", "testimonials"]) }) }),
+  // Award photos are uploaded by award staff, who may not have the forts permission
+  (req, res, next) => (req.query.folder === "awards" ? checkPermission("shivdurg_award_config", "write") : checkPermission("forts", "write"))(req, res, next),
+  validate({ query: z.object({ folder: z.enum(["forts", "content", "videos", "testimonials", "awards"]) }) }),
   imageUpload("file", { maxMb: 10 }),
   asyncHandler(async (req, res) => {
     if (!req.file) throw badRequest("No file uploaded", { file: "Required" });

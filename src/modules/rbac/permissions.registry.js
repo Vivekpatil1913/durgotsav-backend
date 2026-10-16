@@ -16,9 +16,14 @@ export const MODULES = [
   { key: "moderation_bulk",     label: "Bulk Review Actions (select, verify, reject, duplicate)", group: "Participation", supportsWrite: false, supportsDelete: false, alwaysEditable: true },
   { key: "certificates",        label: "Certificates",                        group: "Participation", supportsWrite: true,  supportsDelete: false },
   { key: "reports",             label: "Reports & Export",                    group: "Participation", supportsWrite: true,  supportsDelete: false },
+  // ---- Shivdurg Bhushan award ----
+  { key: "shivdurg_award",        label: "Shivdurg Award Nominations (view, review, status, remarks, evidence)", group: "Shivdurg Award", supportsWrite: true, supportsDelete: false },
+  { key: "shivdurg_award_config", label: "Shivdurg Award Settings (dates, content, committee, winners)",         group: "Shivdurg Award", supportsWrite: true, supportsDelete: false },
   // ---- Geography ----
   { key: "geography",           label: "Geography (Divisions / Districts / Talukas)", group: "Geography", supportsWrite: true, supportsDelete: true },
   // ---- Content ----
+  { key: "website_gallery",     label: "Website Gallery (View & Manage Display)", group: "Content",       supportsWrite: true,  supportsDelete: false },
+  { key: "website_gallery_bulk",label: "Website Gallery Selection (Select & Bulk Add/Remove)", group: "Content", supportsWrite: false, supportsDelete: false, alwaysEditable: true },
   { key: "forts",               label: "Forts",                               group: "Content",       supportsWrite: true,  supportsDelete: true  },
   { key: "content",             label: "Content (Events / Videos / Announcements / etc.)", group: "Content", supportsWrite: true, supportsDelete: true },
   // ---- System ----
