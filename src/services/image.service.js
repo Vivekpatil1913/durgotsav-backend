@@ -142,12 +142,12 @@ export async function storeContentImage(file, folder) {
 }
 
 // pdfkit embeds only JPEG/PNG — convert any stored public image to a small JPEG buffer.
-export async function loadAsJpeg(publicPath, size = 240) {
+export async function loadAsJpeg(publicPath, size = 240, height = size) {
   if (!publicPath?.startsWith("/uploads/")) return null;
   const file = path.join(paths.uploads, publicPath.slice("/uploads/".length));
   if (!file.startsWith(paths.uploads)) return null; // no path traversal
   try {
-    return await sharp(file).resize(size, size, { fit: "cover" }).jpeg({ quality: 85 }).toBuffer();
+    return await sharp(file).resize(size, height, { fit: "cover" }).jpeg({ quality: 85 }).toBuffer();
   } catch {
     return null;
   }
