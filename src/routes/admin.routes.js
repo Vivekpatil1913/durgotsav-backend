@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { EDITION_YEAR } from "../config/edition.js";
 import { query } from "../db/pool.js";
 import { authenticate } from "../middleware/auth.js";
 import { checkExplicitPermission, checkPermission, scopeToAdminDivisions } from "../middleware/permission.js";
@@ -98,7 +99,7 @@ reg.get("/export.csv",
     };
     res.set({
       "Content-Type": "text/csv; charset=utf-8",
-      "Content-Disposition": 'attachment; filename="durgotsav-2026-registrations.csv"',
+      "Content-Disposition": `attachment; filename="durgotsav-${EDITION_YEAR}-registrations.csv"`,
       "Transfer-Encoding": "chunked",
     });
     res.write("﻿" + cols.join(",") + "\n");

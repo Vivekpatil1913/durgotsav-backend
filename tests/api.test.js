@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import sharp from "sharp";
 import request from "supertest";
+import { EDITION_YEAR, EDITION_YEAR_MR, fillYear, NUMBER_PREFIX } from "../src/config/edition.js";
+import { formatRegistrationNo, parseRegistrationNo } from "../src/utils/format.js";
 import { ADMIN, makePhoto, resetDatabase } from "./helpers.js";
 
 let app;
@@ -86,7 +88,7 @@ describe("registration → verification → certificate", () => {
     const res = await register({ email: "rahul@test.local" }, photo);
     assert.equal(res.status, 201, JSON.stringify(res.body));
     reg = res.body.data;
-    assert.match(reg.registration_no, /^DGT26-\d{6}$/);
+    assert.match(reg.registration_no, new RegExp(`^${NUMBER_PREFIX}-\\d{6}$`));
     assert.equal(reg.status, "pending");
 
     const detail = await request(app).get(`/api/admin/registrations/${reg.id}`).set(auth());
@@ -142,7 +144,7 @@ describe("registration → verification → certificate", () => {
     const res = await request(app).post(`/api/admin/registrations/${reg.id}/review`).set(auth()).send({ action: "verify" });
     assert.equal(res.status, 200);
     assert.equal(res.body.data.status, "verified");
-    assert.match(res.body.data.certificate.certificate_no, /^AMRUT-DGT26-/);
+    assert.match(res.body.data.certificate.certificate_no, new RegExp(`^AMRUT-${NUMBER_PREFIX}-`));
 
     const pdf = await request(app).get("/api/certificates/download")
       .query({ registration: reg.registration_no, phone: "9876543210" }).buffer(true).parse((r, cb) => {
@@ -172,7 +174,7 @@ describe("registration → verification → certificate", () => {
 
   test("rejecting a verified registration revokes its certificate and unpublishes the photo", async () => {
     await request(app).post(`/api/admin/registrations/${reg.id}/review`).set(auth()).send({ action: "reject", note: "बनावट छायाचित्र" });
-    const verify = await request(app).get("/api/certificates/verify/AMRUT-DGT26-" + String(reg.id).padStart(6, "0"));
+    const verify = await request(app).get(`/api/certificates/verify/AMRUT-${NUMBER_PREFIX}-${String(reg.id).padStart(6, "0")}`);
     assert.equal(verify.body.data.valid, false);
     assert.equal((await request(app).get("/api/gallery")).body.meta.total, 0);
     assert.equal((await request(app).get("/api/images")).body.total_images, 0);
@@ -227,6 +229,44 @@ describe("CMS", () => {
     assert.equal(res.status, 200);
     const bad = await request(app).put("/api/admin/settings").set(auth()).send({ unknown_key: 1 });
     assert.equal(bad.status, 400);
+  });
+
+  test("important dates are validated, saved and public", async () => {
+    const dates = { festival_begins: "2026-11-02", upload_opens: "2026-11-06", upload_closes: "2026-11-21" };
+    const res = await request(app).put("/api/admin/settings").set(auth()).send({ important_dates: dates });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.data.important_dates, dates);
+
+    const pub = await request(app).get("/api/settings");
+    assert.deepEqual(pub.body.data.important_dates, dates);
+
+    const reversed = await request(app).put("/api/admin/settings").set(auth())
+      .send({ important_dates: { ...dates, upload_closes: "2026-11-01" } });
+    assert.equal(reversed.status, 400);
+    assert.ok(reversed.body.error.details["important_dates.upload_closes"]);
+
+    const invalid = await request(app).put("/api/admin/settings").set(auth())
+      .send({ important_dates: { ...dates, festival_begins: "2026-02-30" } });
+    assert.equal(invalid.status, 400);
+    assert.ok(invalid.body.error.details["important_dates.festival_begins"]);
+  });
+
+  test("public settings fill in {year}; the admin API keeps the placeholder", async () => {
+    const admin = await request(app).get("/api/admin/settings").set(auth());
+    assert.equal(admin.body.data.seo.site_name, "अमृत दुर्गोत्सव {year}");
+    const pub = await request(app).get("/api/settings");
+    assert.equal(pub.body.data.seo.site_name, `अमृत दुर्गोत्सव ${EDITION_YEAR_MR}`);
+    assert.equal(pub.body.data.edition_year, EDITION_YEAR);
+    assert.deepEqual(fillYear({ title: "दुर्गोत्सव {year}", title_en: "Durgotsav {year}", list: ["{year}"] }),
+      { title: `दुर्गोत्सव ${EDITION_YEAR_MR}`, title_en: `Durgotsav ${EDITION_YEAR}`, list: [EDITION_YEAR_MR] });
+  });
+
+  test("registration numbers follow the edition and earlier editions' numbers still resolve", () => {
+    assert.equal(formatRegistrationNo(123), `${NUMBER_PREFIX}-000123`);
+    assert.equal(parseRegistrationNo("DGT25-000123"), 123);
+    assert.equal(parseRegistrationNo("dgt26000123"), 123);
+    assert.equal(parseRegistrationNo("123"), 123);
+    assert.equal(parseRegistrationNo("DGT123"), null);
   });
 
   test("contact form validates and stores enquiries", async () => {

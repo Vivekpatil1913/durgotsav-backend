@@ -1,4 +1,5 @@
 import { createApp } from "./app.js";
+import { EDITION_YEAR } from "./config/edition.js";
 import { env } from "./config/env.js";
 import { pool } from "./db/pool.js";
 import { checkS3Credentials } from "./services/s3.service.js";
@@ -6,7 +7,7 @@ import { logger } from "./utils/logger.js";
 
 const app = createApp();
 const server = app.listen(env.PORT, () => {
-  logger.info(`Durgotsav 2026 API listening on ${env.API_URL} (db: ${env.DB_NAME})`);
+  logger.info(`Durgotsav ${EDITION_YEAR} API listening on ${env.API_URL} (db: ${env.DB_NAME})`);
   if (!env.mailEnabled) logger.warn("Email is OFF — set SMTP_PASSWORD (Gmail App Password) in .env to send certificates");
   if (env.REGISTRATION_FORCE_OPEN) logger.warn("REGISTRATION_FORCE_OPEN=true — registration window in settings is ignored");
   if (env.PARTICIPANT_IMAGE_STORAGE === "s3") {

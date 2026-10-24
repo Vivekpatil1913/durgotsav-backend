@@ -1,5 +1,7 @@
 import { env } from "../../config/env.js";
+import { NUMBER_PREFIX } from "../../config/edition.js";
 import { query } from "../../db/pool.js";
+import { formatRegistrationNo, parseRegistrationNo } from "../../utils/format.js";
 import { pageMeta } from "../../utils/pagination.js";
 
 const VERIFIED_PHOTOS = `
@@ -111,8 +113,10 @@ export async function adminListVerifiedPhotos(options, allowedDivisionIds) {
   // Search
   if (options.q?.trim()) {
     const term = `%${options.q.trim()}%`;
-    params.push(term);
-    const pIndex = params.length;
+    params.push(term, `${NUMBER_PREFIX}-`);
+    const pIndex = params.length - 1;
+    // Registration number: partial match on the current format, or any edition's full number
+    const id = parseRegistrationNo(options.q);
     where += ` AND (
       r.name ILIKE $${pIndex}
       OR r.phone ILIKE $${pIndex}
@@ -121,7 +125,7 @@ export async function adminListVerifiedPhotos(options, allowedDivisionIds) {
       OR d.name_en ILIKE $${pIndex}
       OR f.name_mr ILIKE $${pIndex}
       OR f.name_en ILIKE $${pIndex}
-      OR ('DGT26-' || LPAD(r.id::text, 6, '0')) ILIKE $${pIndex}
+      OR ($${pIndex + 1}::text || LPAD(r.id::text, 6, '0')) ILIKE $${pIndex}${id ? ` OR r.id = ${Number(id)}` : ""}
     )`;
   }
 
@@ -146,7 +150,6 @@ export async function adminListVerifiedPhotos(options, allowedDivisionIds) {
     p.is_featured,
     p.created_at AS photo_created_at,
     r.id AS registration_id,
-    ('DGT26-' || LPAD(r.id::text, 6, '0')) AS registration_no,
     r.name AS participant_name,
     r.participant_type,
     r.organization_name,
@@ -200,7 +203,7 @@ export async function adminListVerifiedPhotos(options, allowedDivisionIds) {
   const stats = statsRes.rows[0];
 
   return {
-    data: itemsRes.rows,
+    data: itemsRes.rows.map((row) => ({ ...row, registration_no: formatRegistrationNo(row.registration_id) })),
     meta: pageMeta({ page, limit }, counts.total),
     counts: {
       filter_total: counts.total,

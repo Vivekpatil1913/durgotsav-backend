@@ -12,6 +12,7 @@
  *   node scripts/create-indexes-live.js
  */
 
+import { EDITION_YEAR } from "../src/config/edition.js";
 import { pool } from "../src/db/pool.js";
 
 const STEPS = [
@@ -130,7 +131,7 @@ const tick = "✓";
 const cross = "✗";
 
 async function run() {
-  console.log("\n=== Durgotsav 2026 — Live Index Creation ===\n");
+  console.log(`\n=== Durgotsav ${EDITION_YEAR} — Live Index Creation ===\n`);
   console.log("Connecting to database...");
 
   // Verify connection

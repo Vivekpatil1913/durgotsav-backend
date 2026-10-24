@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { EDITION_YEAR } from "../config/edition.js";
 import { env } from "../config/env.js";
 import { query } from "../db/pool.js";
 import { asyncHandler } from "../utils/errors.js";
@@ -10,7 +11,7 @@ const STATIC_ROUTES = [
   ["/about", "monthly", "0.8"],
   ["/forts", "weekly", "0.9"],
   ["/participate", "weekly", "0.9"],
-  ["/shivdurg-bhushan-puraskar-2026", "weekly", "0.9"],
+  [`/shivdurg-bhushan-puraskar-${EDITION_YEAR}`, "weekly", "0.9"], // AWARD_PATH of the website
   ["/certificate", "monthly", "0.7"],
   ["/gallery", "daily", "0.8"],
   ["/album", "daily", "0.7"],

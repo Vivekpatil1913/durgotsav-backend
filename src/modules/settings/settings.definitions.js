@@ -2,10 +2,14 @@ import { z } from "zod";
 
 const s = (max) => z.string().trim().max(max);
 const iso = z.string().refine((v) => !Number.isNaN(Date.parse(v)), "Invalid date/time");
+// Calendar date only (YYYY-MM-DD); the round trip rejects dates like 2026-02-30 that Date.parse would roll over
+const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD")
+  .refine((v) => !Number.isNaN(Date.parse(v)) && new Date(`${v}T00:00:00Z`).toISOString().startsWith(v), "Invalid date");
 const link = z.union([z.literal(""), z.string().trim().url().max(500), z.string().startsWith("/").max(500)]);
 
 // Every setting the site knows about: its validation schema, whether the public site may read it,
 // and its initial value (seeded once; edited later in Admin → Settings).
+// Text may say {year}: the public API fills in the edition year (config/edition.js), so it needs no yearly edits.
 export const SETTINGS = {
   registration: {
     public: true,
@@ -18,12 +22,20 @@ export const SETTINGS = {
       note: "दुर्गोत्सवासाठी ऑनलाइन नोंदणी ५ नोव्हेंबर २०२६ पासून सुरू होईल.",
     },
   },
+  // Dates printed on the home page "Important dates" cards. Display only — the registration window above
+  // is what actually opens and closes the form.
+  important_dates: {
+    public: true,
+    schema: z.object({ festival_begins: day, upload_opens: day, upload_closes: day })
+      .refine((v) => v.upload_closes >= v.upload_opens, { path: ["upload_closes"], message: "Deadline must be on or after the upload start date" }),
+    initial: { festival_begins: "2026-11-01", upload_opens: "2026-11-05", upload_closes: "2026-11-20" },
+  },
   hero: {
     public: true,
     schema: z.object({ eyebrow: s(120), title: s(120), subtitle: s(600), image: link }),
     initial: {
       eyebrow: "महाराष्ट्राच्या गौरवशाली वारशाचा उत्सव",
-      title: "अमृत दुर्गोत्सव २०२६",
+      title: "अमृत दुर्गोत्सव {year}",
       subtitle: "शिवछत्रपतींच्या पराक्रमाचे साक्षीदार राहिलेल्या आपल्या १२ गडदुर्गांना UNESCO कडून वैश्विक ख्यातीच्या वास्तू म्हणून मान्यता महाराष्ट्र सरकारच्या अथक प्रयत्नातून नुकतीच मिळाली.",
       image: "/images/rajgad.webp",
     },
@@ -44,7 +56,7 @@ export const SETTINGS = {
       enabled: true,
       eyebrow: "दुर्गोत्सव २०२५ — विश्वविक्रम गौरव",
       title: "Largest Online Photo Album of Handmade Sculptures",
-      body: "आपण सर्वांनी मिळून दुर्गोत्सवाला \"Guinness Book of World Records\" मध्ये स्थान मिळवून दिले. प्रत्येक सहभागी, स्वयंसेवक आणि शुभेच्छुकासाठी हा अभिमानाचा क्षण आहे. दुर्गोत्सव २०२६ मध्ये ही परंपरा अधिक उंचीवर नेऊया!",
+      body: "आपण सर्वांनी मिळून दुर्गोत्सवाला \"Guinness Book of World Records\" मध्ये स्थान मिळवून दिले. प्रत्येक सहभागी, स्वयंसेवक आणि शुभेच्छुकासाठी हा अभिमानाचा क्षण आहे. दुर्गोत्सव {year} मध्ये ही परंपरा अधिक उंचीवर नेऊया!",
       image: "/images/world-record.webp",
     },
   },
@@ -76,8 +88,8 @@ export const SETTINGS = {
     public: true,
     schema: z.object({ site_name: s(120), default_title: s(160), default_description: s(300), og_image: link }),
     initial: {
-      site_name: "अमृत दुर्गोत्सव २०२६",
-      default_title: "अमृत दुर्गोत्सव २०२६ | चला, दुर्ग बनवूया!",
+      site_name: "अमृत दुर्गोत्सव {year}",
+      default_title: "अमृत दुर्गोत्सव {year} | चला, दुर्ग बनवूया!",
       default_description: "दिवाळीत दुर्गाची प्रतिकृती बनवा, छायाचित्र अपलोड करा आणि डिजिटल अभिनंदन पत्र मिळवा. शिवछत्रपतींच्या १२ युनेस्को जागतिक वारसा दुर्गांना मानवंदना.",
       og_image: "/og-image.jpg",
     },

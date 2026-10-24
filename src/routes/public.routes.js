@@ -6,7 +6,9 @@ import { imageUpload, imageUploadFields } from "../middleware/upload.js";
 import { validate } from "../middleware/validate.js";
 import { emailLayout, escapeHtml, sendMail } from "../services/mail.service.js";
 import { env } from "../config/env.js";
+import { EDITION_YEAR } from "../config/edition.js";
 import { asyncHandler, notFound } from "../utils/errors.js";
+import { paginationSchema } from "../utils/pagination.js";
 import { logger } from "../utils/logger.js";
 import * as registrations from "../modules/registrations/registrations.service.js";
 import { lookupSchema, registerSchema, resubmitSchema } from "../modules/registrations/registrations.schemas.js";
@@ -91,7 +93,9 @@ router.get("/forts/:slug", cache(120), validate({ params: z.object({ slug: z.str
 
 router.get("/events", cache(120), asyncHandler(async (req, res) => res.json({ data: await events.service.listPublic() })));
 router.get("/videos", cache(120), asyncHandler(async (req, res) => res.json({ data: await videos.service.listPublic() })));
-router.get("/podcasts", cache(120), asyncHandler(async (req, res) => res.json({ data: await podcasts.service.listPublic() })));
+// GET /api/podcasts?page=N&limit=M — paged so the playlist can grow without bound; the site fetches more as the list scrolls
+router.get("/podcasts", cache(120), validate({ query: paginationSchema.extend({ limit: z.coerce.number().int().min(1).max(50).default(10) }) }),
+  asyncHandler(async (req, res) => res.json(await podcasts.service.pagePublic({ ...req.query, columns: "id, youtube_id, title_mr, title_en" }))));
 router.get("/testimonials", cache(300), asyncHandler(async (req, res) => res.json({ data: await testimonials.service.listPublic() })));
 router.get("/faqs", cache(300), asyncHandler(async (req, res) => res.json({ data: await faqs.service.listPublic() })));
 router.get("/announcements", cache(60), asyncHandler(async (req, res) =>
@@ -134,7 +138,7 @@ async function sendCertificate(res, registration, phone) {
   const pdf = await certificates.renderPdf(cert);
   res.set({
     "Content-Type": "application/pdf",
-    "Content-Disposition": `attachment; filename="Durgotsav-2026-${cert.certificate_no}.pdf"`,
+    "Content-Disposition": `attachment; filename="Durgotsav-${EDITION_YEAR}-${cert.certificate_no}.pdf"`,
     "Cache-Control": "no-store",
   });
   res.send(pdf);

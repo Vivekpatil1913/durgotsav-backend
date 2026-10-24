@@ -132,6 +132,18 @@ export function createCrud(cfg) {
       );
       return rows;
     },
+
+    // Public listing one page at a time — { data, meta } — for lists that load more as the visitor scrolls.
+    // `order` must end in a unique column so OFFSET pages never overlap or skip rows.
+    async pagePublic({ page, limit, columns = "*", orderBy = order }) {
+      const { offset } = paginate({ page, limit });
+      const where = `WHERE ${live} AND is_active`;
+      const [rows, count] = await Promise.all([
+        query(`SELECT ${columns} FROM ${table} ${where} ORDER BY ${orderBy} LIMIT ${Number(limit)} OFFSET ${Number(offset)}`),
+        query(`SELECT COUNT(*)::int AS total FROM ${table} ${where}`),
+      ]);
+      return { data: rows.rows, meta: pageMeta({ page, limit }, count.rows[0].total) };
+    },
   };
 
   const router = Router();

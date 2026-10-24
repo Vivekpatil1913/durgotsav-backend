@@ -1,5 +1,7 @@
+import { EDITION_YEAR, fillYear } from "../../config/edition.js";
 import { env } from "../../config/env.js";
 import { query } from "../../db/pool.js";
+import { SETTINGS } from "./settings.definitions.js";
 
 // Small read-through cache; settings change rarely and are read on every registration.
 let cache = null;
@@ -23,18 +25,23 @@ export async function getSetting(key, fallback = null) {
   return row ? row.value : fallback;
 }
 
+// {year} in admin text is filled in for the public site (the admin API keeps the placeholder). edition_year lets
+// the website and admin console check they are built for the same edition as the API.
 export async function getPublicSettings() {
   const rows = await getAllSettings();
-  const out = Object.fromEntries(rows.filter((r) => r.is_public).map((r) => [r.key, r.value]));
+  const out = fillYear(Object.fromEntries(rows.filter((r) => r.is_public).map((r) => [r.key, r.value])));
+  out.edition_year = EDITION_YEAR;
   out.registration_status = await registrationWindow();
   return out;
 }
 
+// Upsert, so a setting added after the database was seeded is saved instead of silently dropped
 export async function updateSettings(entries, adminId) {
   for (const [key, value] of Object.entries(entries)) {
     await query(
-      `UPDATE site_settings SET value = $2, updated_by = $3 WHERE key = $1`,
-      [key, JSON.stringify(value), adminId],
+      `INSERT INTO site_settings (key, value, is_public, updated_by) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by`,
+      [key, JSON.stringify(value), SETTINGS[key]?.public ?? false, adminId],
     );
   }
   invalidateSettings();

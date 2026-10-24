@@ -1,3 +1,4 @@
+import { EDITION_YEAR, EDITION_YEAR_MR } from "../../config/edition.js";
 import { env } from "../../config/env.js";
 import { query } from "../../db/pool.js";
 import { emailLayout, escapeHtml, sendMail } from "../../services/mail.service.js";
@@ -80,14 +81,14 @@ export async function notify(registrationId) {
       const pdf = await renderPdf(cert);
       result.email = await sendMail({
         to: cert.email,
-        subject: "अमृत दुर्गोत्सव २०२६ — आपले अभिनंदन पत्र",
+        subject: `अमृत दुर्गोत्सव ${EDITION_YEAR_MR} — आपले अभिनंदन पत्र`,
         html: emailLayout(
           `<p>नमस्कार ${escapeHtml(cert.name)},</p>
-           <p>दुर्गोत्सव २०२६ मध्ये सहभाग नोंदविल्याबद्दल आपले हार्दिक अभिनंदन! आपली नोंदणी व छायाचित्राची पडताळणी पूर्ण झाली असून आपले डिजिटल <b>अभिनंदन पत्र</b> सोबत जोडले आहे.</p>
+           <p>दुर्गोत्सव ${EDITION_YEAR_MR} मध्ये सहभाग नोंदविल्याबद्दल आपले हार्दिक अभिनंदन! आपली नोंदणी व छायाचित्राची पडताळणी पूर्ण झाली असून आपले डिजिटल <b>अभिनंदन पत्र</b> सोबत जोडले आहे.</p>
            <p>नोंदणी क्रमांक: <b>${formatRegistrationNo(registrationId)}</b><br>अभिनंदन पत्र क्रमांक: <b>${escapeHtml(cert.certificate_no)}</b></p>
            <p><a href="${link}" style="display:inline-block;background:#c2641c;color:#fff;padding:10px 18px;border-radius:999px;text-decoration:none">अभिनंदन पत्र पुन्हा डाउनलोड करा</a></p>`,
         ),
-        attachments: [{ filename: `Durgotsav-2026-${cert.certificate_no}.pdf`, content: pdf }],
+        attachments: [{ filename: `Durgotsav-${EDITION_YEAR}-${cert.certificate_no}.pdf`, content: pdf }],
       });
       if (result.email) await query("UPDATE certificates SET emailed_at = NOW() WHERE id = $1", [cert.id]);
     } catch (err) {
@@ -97,7 +98,7 @@ export async function notify(registrationId) {
   try {
     result.sms = await sendSms(
       cert.phone,
-      `अमृत दुर्गोत्सव २०२६: आपली नोंदणी ${formatRegistrationNo(registrationId)} पडताळणी पूर्ण. अभिनंदन पत्र डाउनलोड करा: ${link}`,
+      `अमृत दुर्गोत्सव ${EDITION_YEAR_MR}: आपली नोंदणी ${formatRegistrationNo(registrationId)} पडताळणी पूर्ण. अभिनंदन पत्र डाउनलोड करा: ${link}`,
     );
     if (result.sms) await query("UPDATE certificates SET sms_sent_at = NOW() WHERE id = $1", [cert.id]);
   } catch (err) {

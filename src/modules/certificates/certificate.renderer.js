@@ -1,5 +1,6 @@
 import path from "node:path";
 import PDFDocument from "pdfkit";
+import { EDITION_YEAR } from "../../config/edition.js";
 import { paths } from "../../config/paths.js";
 import { loadAsJpeg } from "../../services/image.service.js";
 import { toMarathiDigits } from "../../utils/format.js";
@@ -9,6 +10,7 @@ const FONT = path.join(paths.certificateAssets, "NotoSansDevanagari.ttf");
 // Coordinates are PDF points of the 2026 design ("Durgotsav Certificate.pdf", 1200×855.75 pt).
 // template.jpg is that PDF rendered at 2× (2400×1712) with the sample participant number and
 // sample photo removed, so it stays sharp when printed and is drawn scaled down to the page size.
+// The year is part of the artwork ("दुर्गोत्सव २०२६ मध्ये"): a new edition needs that year's template.jpg.
 const TEMPLATE = {
   file: path.join(paths.certificateAssets, "template.jpg"),
   width: 1200,
@@ -26,7 +28,7 @@ export async function renderCertificatePdf({ registration_id: id, name, photo_pa
     const doc = new PDFDocument({
       size: [t.width, t.height],
       margin: 0,
-      info: { Title: `अभिनंदन पत्र — ${name}`, Author: "AMRUT", Subject: "Amrut Durgotsav 2026" },
+      info: { Title: `अभिनंदन पत्र — ${name}`, Author: "AMRUT", Subject: `Amrut Durgotsav ${EDITION_YEAR}` },
     });
     const chunks = [];
     doc.on("data", (c) => chunks.push(c));
