@@ -24,7 +24,7 @@ const schema = z.object({
   JWT_EXPIRES_IN: z.string().default("8h"),
 
   ALBUM_PAGE_SIZE: z.coerce.number().int().min(1).max(100).default(20),
-  UPLOAD_MAX_MB: z.coerce.number().min(1).max(25).default(8),
+  UPLOAD_MAX_MB: z.coerce.number().min(1).max(25).default(5),
   REGISTRATION_FORCE_OPEN: bool,
   // Shivdurg Bhushan award: true = accept nominations regardless of the configured window (local testing only)
   AWARD_FORCE_OPEN: bool,

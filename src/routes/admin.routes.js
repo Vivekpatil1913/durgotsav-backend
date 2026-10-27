@@ -91,7 +91,7 @@ reg.get("/export.csv",
   checkPermission("reports", "write"),
   validate({ query: adminListSchema }),
   asyncHandler(async (req, res) => {
-    const cols = ["registration_no", "name", "participant_type", "organization_name", "phone", "email", "country", "district", "city", "fort", "status", "review_note", "certificate_no", "created_at"];
+    const cols = ["registration_no", "name", "participant_type", "organization_name", "members_count", "phone", "email", "country", "district", "city", "fort", "status", "review_note", "certificate_no", "created_at"];
     const cell = (v) => {
       let s = v instanceof Date ? v.toISOString() : String(v ?? "");
       if (/^[=+\-@]/.test(s)) s = `'${s}`;

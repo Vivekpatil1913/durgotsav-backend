@@ -4,6 +4,9 @@ import { paginationSchema } from "../../utils/pagination.js";
 export const PARTICIPANT_TYPES = ["individual", "family", "housing_society", "organization", "group", "school", "college"];
 export const STATUSES = ["pending", "info_requested", "verified", "rejected", "duplicate"];
 export const REVIEW_ACTIONS = ["verify", "reject", "request_info", "mark_duplicate", "reset"];
+// group registrations (every type except "individual") say how many people built the replica
+export const MEMBERS_MIN = 2;
+export const MEMBERS_MAX = 10000;
 
 const trimmed = (max) => z.string().trim().max(max);
 const optionalText = (max) =>
@@ -19,6 +22,13 @@ export const registerSchema = z
     participant_type: z.enum(PARTICIPANT_TYPES).default("individual"),
     name: trimmed(150).min(2, "Name is required"),
     organization_name: optionalText(200),
+    members_count: z.preprocess(
+      (v) => (v === "" || v === null ? undefined : v),
+      z.coerce.number().int("Enter a whole number")
+        .min(MEMBERS_MIN, `Enter at least ${MEMBERS_MIN} members`)
+        .max(MEMBERS_MAX, `Enter at most ${MEMBERS_MAX} members`)
+        .optional(),
+    ),
     phone: mobile,
     email: z.preprocess((v) => (v === "" ? undefined : v), z.string().trim().toLowerCase().email("Email is invalid").max(160).optional()),
     country: optionalText(80).default("India"),
@@ -43,6 +53,9 @@ export const registerSchema = z
     }
     if (v.participant_type !== "individual" && v.participant_type !== "family" && !v.organization_name) {
       ctx.addIssue({ code: "custom", path: ["organization_name"], message: "Please enter the name of the society / organisation / school" });
+    }
+    if (v.participant_type !== "individual" && !v.members_count) {
+      ctx.addIssue({ code: "custom", path: ["members_count"], message: "Please enter how many members built the replica" });
     }
   });
 
@@ -96,6 +109,7 @@ export const updateRegistrationSchema = z.object({
   participant_type: z.enum(PARTICIPANT_TYPES).optional(),
   name: trimmed(150).min(2).optional(),
   organization_name: z.string().trim().max(200).nullable().optional(),
+  members_count: z.number().int().min(1).max(MEMBERS_MAX).nullable().optional(),
   phone: mobile.optional(),
   email: z.string().trim().toLowerCase().email().max(160).nullable().or(z.literal("").transform(() => null)).optional(),
   country: trimmed(80).optional(),

@@ -11,7 +11,7 @@ export function notFoundHandler(req, res) {
 export function errorHandler(err, req, res, next) {
   if (err instanceof multer.MulterError) {
     const message = err.code === "LIMIT_FILE_SIZE"
-      ? `File must be ${env.UPLOAD_MAX_MB} MB or smaller`
+      ? `The photo is larger than ${env.UPLOAD_MAX_MB} MB. Please choose a photo of ${env.UPLOAD_MAX_MB} MB or less.`
       : err.message;
     // err.field names the upload field (photo / photo_2) so the form can mark the right one
     return res.status(400).json({ error: { code: err.code, message, ...(err.field && { details: { [err.field]: message } }) } });

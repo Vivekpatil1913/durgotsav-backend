@@ -13,7 +13,7 @@ import * as certificates from "../certificates/certificates.service.js";
 const NEAR_DUPLICATE_BITS = 6;
 
 const SELECT_LIST = `
-  SELECT r.id, r.participant_type, r.name, r.organization_name, r.phone, r.email, r.country, r.city,
+  SELECT r.id, r.participant_type, r.name, r.organization_name, r.members_count, r.phone, r.email, r.country, r.city,
          r.status, r.review_note, r.reviewed_at, r.created_at, r.deleted_at, r.source,
          r.district_id, d.name_mr AS district, r.division_id, dv.name_mr AS division,
          r.taluka_id, t.name_mr AS taluka,
@@ -183,8 +183,8 @@ export async function register(input, files, meta) {
         `INSERT INTO registrations
            (participant_type, name, organization_name, phone, email, country,
             district_id, division_id, taluka_id, city, fort_id, replica_notes,
-            ip_address, user_agent, submission_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+            ip_address, user_agent, submission_id, members_count)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
          RETURNING id, status, created_at`,
         [input.participant_type, input.name, input.organization_name ?? null, input.phone,
           input.email ?? null, input.country || "India",
@@ -192,7 +192,8 @@ export async function register(input, files, meta) {
           input.country === "India" ? (division_id ?? null) : null,
           input.country === "India" ? (input.taluka_id ?? null) : null,
           input.city ?? null, input.fort_id ?? null, input.replica_notes ?? null,
-          meta.ip, meta.userAgent?.slice(0, 300) ?? null, input.submission_id ?? null],
+          meta.ip, meta.userAgent?.slice(0, 300) ?? null, input.submission_id ?? null,
+          input.participant_type === "individual" ? null : (input.members_count ?? null)],
       );
       const registration = rows[0];
       const owner = { id: registration.id, name: input.name, phone: input.phone };
