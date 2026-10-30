@@ -22,6 +22,9 @@ export const SETTINGS = {
       note: "दुर्गोत्सवासाठी ऑनलाइन नोंदणी ५ नोव्हेंबर २०२६ पासून सुरू होईल.",
     },
   },
+  // Admin → Settings "Force open registration": true accepts registrations whatever the window above says.
+  // Admin-only — the public site just sees registration_status.open. REGISTRATION_FORCE_OPEN=true in .env also forces it.
+  registration_force_open: { public: false, schema: z.boolean(), initial: false },
   // Dates printed on the home page "Important dates" cards. Display only — the registration window above
   // is what actually opens and closes the form.
   important_dates: {

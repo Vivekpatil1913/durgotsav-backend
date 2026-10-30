@@ -36,7 +36,9 @@ router.get("/health", asyncHandler(async (req, res) => {
 }));
 
 // ------------------------------------------------------------- site data
-router.get("/settings", cache(60), asyncHandler(async (req, res) => res.json({ data: await getPublicSettings() })));
+// Not cached: registration_status changes the moment an admin opens or closes registration. Browsers still revalidate
+// cheaply — the ETag turns an unchanged response into a 304 — and the server reads the settings from memory.
+router.get("/settings", (req, res, next) => { res.set("Cache-Control", "no-cache"); next(); }, asyncHandler(async (req, res) => res.json({ data: await getPublicSettings() })));
 
 router.get("/divisions", cache(3600), asyncHandler(async (req, res) => {
   const { rows } = await query(
@@ -112,7 +114,8 @@ router.get("/pages/:slug", cache(300), validate({ params: z.object({ slug: z.str
   }));
 
 // ------------------------------------------------------------- photos
-router.get("/gallery", cache(30), validate({ query: pageQuery.extend({ limit: z.coerce.number().int().min(1).max(60).default(24) }) }),
+// GET /api/gallery?page=N&limit=M&district_id=&fort_id= — filtered and paged in SQL; meta.page is clamped to the last page
+router.get("/gallery", cache(30), validate({ query: pageQuery.extend({ limit: z.coerce.number().int().min(1).max(60).default(10) }) }),
   asyncHandler(async (req, res) => res.json(await galleryService.gallery(req.query))));
 
 // GET /api/images?page=N — the photo album, ALBUM_PAGE_SIZE per page

@@ -30,6 +30,11 @@ export const registerSchema = z
         .optional(),
     ),
     phone: mobile,
+    // optional; the form sends the mobile number here when "same as mobile" is ticked
+    whatsapp_number: z.preprocess(
+      (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+      z.string().trim().regex(/^[6-9]\d{9}$/, "Enter a valid 10-digit WhatsApp number").optional(),
+    ),
     email: z.preprocess((v) => (v === "" ? undefined : v), z.string().trim().toLowerCase().email("Email is invalid").max(160).optional()),
     country: optionalText(80).default("India"),
     district_id: optionalId,
@@ -85,7 +90,9 @@ export const adminListSchema = paginationSchema.extend({
   duplicates: boolish,
   featured: boolish,
   trashed: boolish,
-  sort: z.enum(["newest", "oldest", "name"]).default("newest"),
+  // Column keys of SORTS in registrations.service.js; newest / oldest are the older named orders, still accepted
+  sort: z.enum(["created_at", "registration_no", "name", "phone", "status", "newest", "oldest"]).default("created_at"),
+  dir: z.enum(["asc", "desc"]).optional(),
 });
 
 export const reviewSchema = z
@@ -111,6 +118,7 @@ export const updateRegistrationSchema = z.object({
   organization_name: z.string().trim().max(200).nullable().optional(),
   members_count: z.number().int().min(1).max(MEMBERS_MAX).nullable().optional(),
   phone: mobile.optional(),
+  whatsapp_number: mobile.nullable().or(z.literal("").transform(() => null)).optional(),
   email: z.string().trim().toLowerCase().email().max(160).nullable().or(z.literal("").transform(() => null)).optional(),
   country: trimmed(80).optional(),
   district_id: z.number().int().positive().nullable().optional(),

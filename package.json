@@ -17,6 +17,7 @@
     "db:setup": "npm run db:create && npm run db:migrate && npm run db:seed",
     "legacy:import": "node scripts/legacy-import.js",
     "certificates:send-pending": "node scripts/send-pending-certificates.js",
+    "certificates:worker": "node scripts/certificate-worker.js",
     "s3:check": "node scripts/s3-check.js",
     "test": "node --test --test-concurrency=1 \"tests/**/*.test.js\""
   },

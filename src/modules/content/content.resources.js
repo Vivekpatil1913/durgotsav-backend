@@ -114,6 +114,7 @@ export const pages = createCrud({
   softDelete: false,
   hasSortOrder: false,
   order: "slug ASC",
+  sortable: ["updated_at"],
   actions: ["list", "get", "create", "update", "toggle"],
   schema: z.object({
     slug: z.string().trim().regex(/^[a-z0-9-]{2,80}$/, "Lowercase letters, digits and - only"),
@@ -144,6 +145,7 @@ export const districts = createCrud({
   entity: "district",
   searchable: ["name_mr", "name_en", "division_name"],
   filters: { is_active: "bool", division_id: "string" },
+  sortable: ["division_name"],
   schema: z.object({
     name_mr: text(80, { required: true }),
     name_en: text(80, { required: true }),
@@ -165,6 +167,7 @@ export const talukas = createCrud({
   entity: "taluka",
   searchable: ["name_mr", "name_en", "district_name"],
   filters: { is_active: "bool", district_id: "string" },
+  sortable: ["district_name"],
   order: "district_id ASC, sort_order ASC, id ASC",
   schema: z.object({
     name_mr: text(100, { required: true }),
@@ -189,6 +192,7 @@ export const enquiries = createCrud({
   filters: { status: "string" },
   hasSortOrder: false,
   order: "created_at DESC",
+  sortable: ["name", "subject", "status", "created_at"],
   actions: ["list", "get", "update", "delete", "restore"],
   roles: ["admin", "moderator"],
   schema: z.object({}),

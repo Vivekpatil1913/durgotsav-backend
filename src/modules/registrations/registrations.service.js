@@ -1,19 +1,21 @@
+import { EDITION_YEAR_MR } from "../../config/edition.js";
 import { env } from "../../config/env.js";
 import { pool, query, withTransaction } from "../../db/pool.js";
 import { prepareParticipantPhoto, removeFiles, writeLocalOriginal, writePublicCopies } from "../../services/image.service.js";
+import { emailLayout, escapeHtml, sendMail } from "../../services/mail.service.js";
 import { istDateFolder, participantFolderName, photoObjectKey } from "../../services/participant-photo-keys.js";
 import { deleteObject, ObjectExistsError, presignGetUrl, putObjectIfAbsent } from "../../services/s3.service.js";
 import { logger } from "../../utils/logger.js";
 import { badRequest, conflict, forbidden, notFound, AppError } from "../../utils/errors.js";
 import { formatRegistrationNo, parseRegistrationNo } from "../../utils/format.js";
-import { paginate, pageMeta } from "../../utils/pagination.js";
+import { paginate, pageMeta, sortSql } from "../../utils/pagination.js";
 import { registrationWindow } from "../settings/settings.service.js";
 import * as certificates from "../certificates/certificates.service.js";
 
 const NEAR_DUPLICATE_BITS = 6;
 
 const SELECT_LIST = `
-  SELECT r.id, r.participant_type, r.name, r.organization_name, r.members_count, r.phone, r.email, r.country, r.city,
+  SELECT r.id, r.participant_type, r.name, r.organization_name, r.members_count, r.phone, r.whatsapp_number, r.email, r.country, r.city,
          r.status, r.review_note, r.reviewed_at, r.created_at, r.deleted_at, r.source,
          r.district_id, d.name_mr AS district, r.division_id, dv.name_mr AS division,
          r.taluka_id, t.name_mr AS taluka,
@@ -183,8 +185,8 @@ export async function register(input, files, meta) {
         `INSERT INTO registrations
            (participant_type, name, organization_name, phone, email, country,
             district_id, division_id, taluka_id, city, fort_id, replica_notes,
-            ip_address, user_agent, submission_id, members_count)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+            ip_address, user_agent, submission_id, members_count, whatsapp_number)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
          RETURNING id, status, created_at`,
         [input.participant_type, input.name, input.organization_name ?? null, input.phone,
           input.email ?? null, input.country || "India",
@@ -193,7 +195,8 @@ export async function register(input, files, meta) {
           input.country === "India" ? (input.taluka_id ?? null) : null,
           input.city ?? null, input.fort_id ?? null, input.replica_notes ?? null,
           meta.ip, meta.userAgent?.slice(0, 300) ?? null, input.submission_id ?? null,
-          input.participant_type === "individual" ? null : (input.members_count ?? null)],
+          input.participant_type === "individual" ? null : (input.members_count ?? null),
+          input.whatsapp_number ?? null],
       );
       const registration = rows[0];
       const owner = { id: registration.id, name: input.name, phone: input.phone };
@@ -288,7 +291,18 @@ export async function resubmit(registrationInput, { phone, replica_notes }, file
 
 // ---------------------------------------------------------------- admin
 
-const SORTS = { newest: "r.created_at DESC, r.id DESC", oldest: "r.created_at ASC, r.id ASC", name: "r.name ASC, r.id ASC" };
+// Admin list orders by column. Every column runs in one direction, so a row tuple compares like the ORDER BY (see
+// neighbors). Each has an index (migrations 001, 006 and 031); all columns are NOT NULL.
+const SORTS = {
+  created_at: { cols: "r.created_at, r.id", dir: "desc" },
+  registration_no: { cols: "r.id", dir: "desc" },
+  name: { cols: "r.name, r.id", dir: "asc" },
+  phone: { cols: "r.phone, r.id", dir: "asc" },
+  status: { cols: "r.status, r.created_at, r.id", dir: "asc" },
+};
+// The older named orders, still accepted (the review queue and saved links use them)
+const SORT_ALIASES = { newest: { sort: "created_at", dir: "desc" }, oldest: { sort: "created_at", dir: "asc" } };
+const sortOf = (f) => SORT_ALIASES[f.sort] ?? { sort: f.sort, dir: f.dir };
 
 function buildFilters(f, allowedDivisionIds) {
   const where = [f.trashed ? "r.deleted_at IS NOT NULL" : "r.deleted_at IS NULL"];
@@ -312,7 +326,7 @@ function buildFilters(f, allowedDivisionIds) {
     params.push(`%${f.q}%`);
     const like = `$${params.length}`;
     const idClause = id ? ` OR r.id = ${Number(id)}` : "";
-    where.push(`(r.name ILIKE ${like} OR r.phone LIKE ${like} OR r.email ILIKE ${like} OR r.organization_name ILIKE ${like}${idClause})`);
+    where.push(`(r.name ILIKE ${like} OR r.phone LIKE ${like} OR r.whatsapp_number LIKE ${like} OR r.email ILIKE ${like} OR r.organization_name ILIKE ${like}${idClause})`);
   }
   // Division scope — always applied last; overrides any explicit division_id filter
   addDivisionScope(where, params, allowedDivisionIds);
@@ -323,7 +337,7 @@ export async function adminList(filters, allowedDivisionIds) {
   const { where, params } = buildFilters(filters, allowedDivisionIds);
   const { limit, offset } = paginate(filters);
   const [{ rows }, count] = await Promise.all([
-    query(`${SELECT_LIST} ${where} ORDER BY ${SORTS[filters.sort]} LIMIT ${limit} OFFSET ${offset}`, params),
+    query(`${SELECT_LIST} ${where} ORDER BY ${sortSql(SORTS, sortOf(filters), "created_at")} LIMIT ${limit} OFFSET ${offset}`, params),
     query(
       `SELECT COUNT(*)::int AS total FROM registrations r
        LEFT JOIN registration_photos p ON p.registration_id = r.id AND p.is_current AND p.position = 1 ${where}`,
@@ -333,9 +347,52 @@ export async function adminList(filters, allowedDivisionIds) {
   return { data: rows.map(decorate), meta: pageMeta(filters, count.rows[0].total) };
 }
 
+/**
+ * Previous / next record around `id` in an admin list (the review queue) with the same filters, sort and division
+ * scope, plus the record's position. It works from the record's own sort key, so it also answers for a record that
+ * has just left the list (reviewed): next is then the record that followed it. The sort key is read inside SQL,
+ * keeping created_at's microseconds. prev / next are index lookups; only the position needs a count.
+ */
+export async function neighbors(id, filters, allowedDivisionIds) {
+  await assertRegistrationScope(id, allowedDivisionIds);
+  const exists = await query("SELECT 1 FROM registrations WHERE id = $1", [id]);
+  if (!exists.rowCount) throw notFound("Registration not found");
+
+  const { where, params } = buildFilters(filters, allowedDivisionIds);
+  const s = sortOf(filters);
+  const { cols, dir } = SORTS[s.sort] ?? SORTS.created_at;
+  const desc = (s.dir ?? dir) === "desc";
+  params.push(id);
+  const idParam = `$${params.length}`;
+  const cursor = `(SELECT ${cols.replaceAll("r.", "c.")} FROM registrations c WHERE c.id = ${idParam})`;
+  const order = (descending) => cols.split(", ").map((c) => `${c} ${descending ? "DESC" : "ASC"}`).join(", ");
+  const from = `FROM registrations r
+    LEFT JOIN registration_photos p ON p.registration_id = r.id AND p.is_current AND p.position = 1 ${where}`;
+  const [next, prev, counts] = await Promise.all([
+    query(`SELECT r.id ${from} AND (${cols}) ${desc ? "<" : ">"} ${cursor} ORDER BY ${order(desc)} LIMIT 1`, params),
+    query(`SELECT r.id ${from} AND (${cols}) ${desc ? ">" : "<"} ${cursor} ORDER BY ${order(!desc)} LIMIT 1`, params),
+    query(
+      `SELECT COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE (${cols}) ${desc ? ">" : "<"} ${cursor})::int AS before,
+              COALESCE(BOOL_OR(r.id = ${idParam}), FALSE) AS in_list
+       ${from}`,
+      params,
+    ),
+  ]);
+  const { total, before, in_list: inList } = counts.rows[0];
+  return {
+    id,
+    prev_id: prev.rows[0]?.id ?? null,
+    next_id: next.rows[0]?.id ?? null,
+    // null when the record is no longer in the list (just reviewed, or changed by another admin)
+    position: inList ? before + 1 : null,
+    total,
+  };
+}
+
 export async function* adminExportStream(filters, allowedDivisionIds) {
   const { where, params } = buildFilters(filters, allowedDivisionIds);
-  const sort = SORTS[filters.sort] || SORTS.newest;
+  const sort = sortSql(SORTS, sortOf(filters), "created_at");
   const client = await pool.connect();
   try {
     await client.query("BEGIN READ ONLY");
@@ -379,7 +436,11 @@ export async function adminDetail(id, allowedDivisionIds) {
        WHERE p.registration_id = $1 ORDER BY p.is_current DESC, p.position, p.id DESC`,
       [id],
     ),
-    query("SELECT * FROM certificates WHERE registration_id = $1", [id]),
+    query(
+      `SELECT c.*, j.status AS email_status, j.last_error AS email_error FROM certificates c
+       LEFT JOIN certificate_email_jobs j ON j.certificate_id = c.id WHERE c.registration_id = $1`,
+      [id],
+    ),
     query(
       `SELECT id, name, status, created_at FROM registrations
        WHERE phone = $1 AND id <> $2 AND deleted_at IS NULL ORDER BY id`,
@@ -434,6 +495,8 @@ const DUPLICATE_NOTE = "हे छायाचित्र दुसऱ्या
 export async function review(ids, action, note, adminId, allowedDivisionIds) {
   const status = ACTION_STATUS[action];
   return withTransaction(async (client) => {
+    // Lock in id order, so overlapping bulk reviews by two admins wait for each other instead of deadlocking
+    await client.query("SELECT 1 FROM registrations WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE", [ids]);
     // Scope: only update registrations the admin has access to
     const divClause = allowedDivisionIds === null
       ? ""
@@ -450,6 +513,8 @@ export async function review(ids, action, note, adminId, allowedDivisionIds) {
     const changed = rows.map((r) => r.id);
     if (action === "verify") {
       await certificates.issueBatch(client, changed, adminId);
+      // Same transaction: a verified registration always has its certificate email queued (and never twice)
+      await certificates.queueEmails(client, changed, adminId);
     } else {
       await certificates.revokeForRegistrations(client, changed, adminId, `Registration ${status}${note ? `: ${note}` : ""}`);
       if (action === "reject" || action === "mark_duplicate") {
@@ -461,6 +526,52 @@ export async function review(ids, action, note, adminId, allowedDivisionIds) {
     }
     return changed;
   });
+}
+
+const BUTTON_STYLE = "display:inline-block;background:#c2641c;color:#fff;padding:10px 18px;border-radius:999px;text-decoration:none";
+
+function rejectionEmail(r, window) {
+  const regNo = formatRegistrationNo(r.id);
+  const closes = window.closesAt
+    ? ` (नोंदणी ${new Date(window.closesAt).toLocaleDateString("mr-IN", { day: "numeric", month: "long", year: "numeric", timeZone: "Asia/Kolkata" })} पर्यंत सुरू आहे)`
+    : "";
+  const again = window.open
+    ? `<p><b>आपण पुन्हा सहभागी होऊ शकता.</b> वरील कारण लक्षात घेऊन, आपण व आपली दुर्ग प्रतिकृती दोन्ही स्पष्ट दिसतील असे नवीन, मूळ छायाचित्र काढा आणि पुन्हा नोंदणी करा${closes}.</p>
+       <p><a href="${env.SITE_URL}/participate" style="${BUTTON_STYLE}">पुन्हा नोंदणी करा</a></p>`
+    : "<p>नोंदणीचा कालावधी संपला असल्याने आता नवीन नोंदणी करता येणार नाही. अधिक माहितीसाठी कृपया आमच्याशी संपर्क साधा.</p>";
+  return {
+    to: r.email,
+    subject: `अमृत दुर्गोत्सव ${EDITION_YEAR_MR} — आपली नोंदणी ${regNo} अमान्य`,
+    html: emailLayout(
+      `<p>नमस्कार ${escapeHtml(r.name)},</p>
+       <p>दुर्गोत्सव ${EDITION_YEAR_MR} मध्ये सहभाग नोंदविल्याबद्दल धन्यवाद. आपल्या नोंदणीतील छायाचित्राची पडताळणी केली असता ते स्वीकारता आले नाही, त्यामुळे ही नोंदणी अमान्य करण्यात आली आहे.</p>
+       <p>नोंदणी क्रमांक: <b>${regNo}</b></p>
+       <p style="background:#fdecea;border-left:4px solid #b3261e;padding:12px 16px;border-radius:8px"><b>कारण:</b><br>${escapeHtml(r.review_note).replace(/\n/g, "<br>")}</p>
+       ${again}
+       <p style="font-size:13px;color:#6b5743">नोंदणीची स्थिती येथे पाहा: <a href="${env.SITE_URL}/certificate?registration=${regNo}">${regNo}</a></p>`,
+    ),
+  };
+}
+
+// Emails the admin's rejection reason to each participant, with a link to register again. Runs after the review
+// committed; it never throws, so a mail failure is logged and does not undo the rejection.
+export async function emailRejections(ids) {
+  try {
+    const [{ rows }, window] = await Promise.all([
+      query(
+        `SELECT id, name, email, review_note FROM registrations
+         WHERE id = ANY($1::int[]) AND status = 'rejected' AND email IS NOT NULL AND deleted_at IS NULL`,
+        [ids],
+      ),
+      registrationWindow(),
+    ]);
+    for (const r of rows) {
+      await sendMail(rejectionEmail(r, window))
+        .catch((err) => logger.error({ err, registrationId: r.id }, "Rejection email failed"));
+    }
+  } catch (err) {
+    logger.error({ err, ids }, "Rejection emails failed");
+  }
 }
 
 export async function update(id, fields, allowedDivisionIds) {

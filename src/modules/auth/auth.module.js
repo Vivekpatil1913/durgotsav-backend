@@ -8,7 +8,7 @@ import { loginLimiter } from "../../middleware/rateLimit.js";
 import { validate } from "../../middleware/validate.js";
 import { audit } from "../../services/audit.service.js";
 import { asyncHandler, badRequest, conflict, forbidden, notFound, unauthorized } from "../../utils/errors.js";
-import { paginate, pageMeta, paginationSchema } from "../../utils/pagination.js";
+import { paginate, pageMeta, paginationSchema, sortParams, sortSql } from "../../utils/pagination.js";
 import * as rbac from "../rbac/rbac.service.js";
 
 const password = z.string().min(10, "Use at least 10 characters").max(128)
@@ -90,8 +90,21 @@ const createSchema = z.object({
 });
 const updateSchema = createSchema.partial().extend({ password: password.optional() });
 
+// Column-header sorts (a handful of admins, so no index is needed); without ?sort= the list stays in id order
+const ADMIN_SORTS = {
+  name:          { cols: "a.name, a.id", dir: "asc" },
+  role:          { cols: "r.name, a.id", dir: "asc" },
+  is_active:     { cols: "a.is_active, a.id", dir: "desc" },
+  created_at:    { cols: "a.created_at, a.id", dir: "desc" },
+  last_login_at: { cols: "a.last_login_at, a.id", dir: "desc", nullsLast: true },
+};
+
 adminsRouter.get("/",
-  validate({ query: paginationSchema.extend({ q: z.string().max(100).optional(), trashed: z.enum(["true", "false"]).optional() }) }),
+  validate({ query: paginationSchema.extend({
+    q: z.string().max(100).optional(),
+    trashed: z.enum(["true", "false"]).optional(),
+    ...sortParams(Object.keys(ADMIN_SORTS)),
+  }) }),
   asyncHandler(async (req, res) => {
     const params = [];
     const where = [req.query.trashed === "true" ? "a.deleted_at IS NOT NULL" : "a.deleted_at IS NULL"];
@@ -103,7 +116,8 @@ adminsRouter.get("/",
     const sql = `WHERE ${where.join(" AND ")}`;
     const [list, count] = await Promise.all([
       query(
-        `SELECT ${WITH_ROLE} FROM admins a JOIN roles r ON r.id = a.role_id ${sql} ORDER BY a.id LIMIT ${limit} OFFSET ${offset}`,
+        `SELECT ${WITH_ROLE} FROM admins a JOIN roles r ON r.id = a.role_id ${sql}
+         ORDER BY ${req.query.sort ? sortSql(ADMIN_SORTS, req.query) : "a.id"} LIMIT ${limit} OFFSET ${offset}`,
         params,
       ),
       query(`SELECT COUNT(*)::int AS total FROM admins a ${sql}`, params),

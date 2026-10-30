@@ -1,4 +1,5 @@
 import { query } from "../../db/pool.js";
+import { sortSql } from "../../utils/pagination.js";
 
 // ── In-process TTL cache (super-admin only; scoped queries are never cached) ──
 const DASHBOARD_TTL_MS   = 30_000;
@@ -111,7 +112,17 @@ export async function dashboard(allowedDivisionIds) {
   return fetchDashboard(allowedDivisionIds);
 }
 
-export async function districtStats(allowedDivisionIds, { page = 1, limit = 10 } = {}) {
+// Orders by output column (one row per district / division, so no index is involved); id breaks ties
+const countSorts = (id) => ({
+  total:    { cols: `total, ${id}`,    dir: "desc" },
+  verified: { cols: `verified, ${id}`, dir: "desc" },
+  pending:  { cols: `pending, ${id}`,  dir: "desc" },
+  rejected: { cols: `rejected, ${id}`, dir: "desc" },
+});
+export const DISTRICT_SORTS = { district: { cols: "district, d.id", dir: "asc" }, ...countSorts("d.id") };
+export const DIVISION_SORTS = { division: { cols: "division, div.id", dir: "asc" }, ...countSorts("div.id") };
+
+export async function districtStats(allowedDivisionIds, { page = 1, limit = 10, ...sort } = {}) {
   const df     = divisionFilter("r", allowedDivisionIds);
   const offset = (page - 1) * limit;
 
@@ -126,7 +137,7 @@ export async function districtStats(allowedDivisionIds, { page = 1, limit = 10 }
            COUNT(r.id) FILTER (WHERE r.status = 'rejected')::int AS rejected
     FROM districts d
     LEFT JOIN registrations r ON r.district_id = d.id AND r.deleted_at IS NULL ${df}
-    GROUP BY d.id ORDER BY total DESC, d.sort_order
+    GROUP BY d.id ORDER BY ${sortSql(DISTRICT_SORTS, sort, "total")}
     LIMIT $1 OFFSET $2`, [limit, offset]);
 
   return { items, meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
@@ -135,7 +146,7 @@ export async function districtStats(allowedDivisionIds, { page = 1, limit = 10 }
 // ── divisionStats ────────────────────────────────────────────────────────────
 // Returns a flat array (max ~6 rows) — no pagination needed.
 
-export async function divisionStats(allowedDivisionIds, { page = 1, limit = 10 } = {}) {
+export async function divisionStats(allowedDivisionIds, { page = 1, limit = 10, ...sort } = {}) {
   const df = divisionFilter("r", allowedDivisionIds);
   const divScope = allowedDivisionIds === null ? ""
     : allowedDivisionIds.length === 0 ? "AND FALSE"
@@ -153,7 +164,7 @@ export async function divisionStats(allowedDivisionIds, { page = 1, limit = 10 }
     FROM divisions div
     LEFT JOIN registrations r ON r.division_id = div.id AND r.deleted_at IS NULL ${df}
     WHERE div.deleted_at IS NULL ${divScope}
-    GROUP BY div.id ORDER BY total DESC, div.sort_order
+    GROUP BY div.id ORDER BY ${sortSql(DIVISION_SORTS, sort, "total")}
     LIMIT $1 OFFSET $2`, [limit, (page - 1) * limit]);
 
   return { items, meta: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) } };
@@ -163,15 +174,22 @@ export async function divisionStats(allowedDivisionIds, { page = 1, limit = 10 }
 // Groups registrations by (city free-text, district) with pagination and sort.
 // "city" is a free-text VARCHAR — null / blank entries are grouped as one bucket.
 
-const CITY_SORT_COLS = {
-  city: "city", registrations: "registrations", uploaded: "uploaded",
-  verified: "verified", pending: "pending", rejected: "rejected", certificates: "certificates",
+// (city, district_id) is unique per row, so it breaks ties and pages never overlap. Outside Maharashtra the district
+// is NULL: those rows go last either way.
+const citySort = (col, dir) => ({ cols: `${col}, city, district_id`, dir, nullsLast: true });
+export const CITY_SORTS = {
+  city:          { cols: "city, district_id", dir: "asc", nullsLast: true },
+  district:      citySort("district", "asc"),
+  registrations: citySort("registrations", "desc"),
+  uploaded:      citySort("uploaded", "desc"),
+  verified:      citySort("verified", "desc"),
+  pending:       citySort("pending", "desc"),
+  rejected:      citySort("rejected", "desc"),
+  certificates:  citySort("certificates", "desc"),
 };
 
-export async function cityStats(allowedDivisionIds, { page = 1, limit = 25, sort = "registrations", dir = "desc", district } = {}) {
+export async function cityStats(allowedDivisionIds, { page = 1, limit = 25, district, ...sort } = {}) {
   const df      = divisionFilter("r", allowedDivisionIds);
-  const sortCol = CITY_SORT_COLS[sort] ?? "registrations";
-  const sortDir = dir === "asc" ? "ASC" : "DESC";
 
   // Build optional district filter (by Marathi name from the districts table)
   const params = [];
@@ -211,7 +229,7 @@ export async function cityStats(allowedDivisionIds, { page = 1, limit = 25, sort
     LEFT JOIN certificates cert ON cert.registration_id = r.id AND cert.revoked_at IS NULL
     WHERE r.deleted_at IS NULL ${df} ${districtClause}
     GROUP BY NULLIF(TRIM(r.city), ''), d.id, d.name_mr, d.name_en
-    ORDER BY ${sortCol} ${sortDir} NULLS LAST
+    ORDER BY ${sortSql(CITY_SORTS, sort, "registrations")}
     LIMIT $${lp} OFFSET $${op}`,
     [...params, limit, (page - 1) * limit]);
 

@@ -27,6 +27,13 @@ function register(fields = {}, photo) {
   return req;
 }
 
+// Selects a registration's current main photo for the public album and gallery
+async function feature(registrationId) {
+  const detail = await request(app).get(`/api/admin/registrations/${registrationId}`).set(auth());
+  const current = detail.body.data.photos.find((p) => p.is_current);
+  await request(app).post("/api/admin/registrations/photos/feature").set(auth()).send({ photo_ids: [current.id], featured: true });
+}
+
 describe("auth", () => {
   test("rejects a wrong password with a generic message", async () => {
     const res = await request(app).post("/api/auth/login").send({ email: ADMIN.email, password: "wrong-password" });
@@ -48,9 +55,11 @@ describe("auth", () => {
   });
 
   test("moderators cannot change settings or manage admins", async () => {
+    const roles = await request(app).get("/api/admin/rbac").set(auth());
+    const moderator = roles.body.data.find((r) => r.slug === "moderator");
     const created = await request(app).post("/api/admin/admins").set(auth())
-      .send({ name: "Moderator", email: "mod@test.local", role: "moderator", password: "Moderator123" });
-    assert.equal(created.status, 201);
+      .send({ name: "Moderator", email: "mod@test.local", role_id: moderator.id, password: "Moderator123" });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
     const login = await request(app).post("/api/auth/login").send({ email: "mod@test.local", password: "Moderator123" });
     const mod = { Authorization: `Bearer ${login.body.token}` };
     assert.equal((await request(app).put("/api/admin/settings").set(mod).send({})).status, 403);
@@ -160,15 +169,14 @@ describe("registration → verification → certificate", () => {
     assert.equal(verify.body.data.valid, true);
   });
 
-  test("verified photo appears in the album; featuring adds it to the gallery", async () => {
+  test("a verified photo is public only after an admin selects it for the album and gallery", async () => {
     const album = await request(app).get("/api/images?page=1");
-    assert.equal(album.body.total_images, 1);
+    assert.equal(album.body.total_images, 0);
     assert.equal(album.body.page_size, 20);
     assert.equal((await request(app).get("/api/gallery")).body.meta.total, 0);
 
-    const detail = await request(app).get(`/api/admin/registrations/${reg.id}`).set(auth());
-    const current = detail.body.data.photos.find((p) => p.is_current);
-    await request(app).post("/api/admin/registrations/photos/feature").set(auth()).send({ photo_ids: [current.id], featured: true });
+    await feature(reg.id);
+    assert.equal((await request(app).get("/api/images?page=1")).body.total_images, 1);
     assert.equal((await request(app).get("/api/gallery")).body.meta.total, 1);
   });
 
@@ -186,6 +194,8 @@ describe("registration → verification → certificate", () => {
     const bulk = await request(app).post("/api/admin/registrations/bulk-review").set(auth()).send({ ids, action: "verify" });
     assert.deepEqual(bulk.body.data.updated.sort(), ids.sort());
     assert.equal((await request(app).get("/api/stats")).body.data.verified, 3);
+    for (const id of ids) await feature(id);
+    assert.equal((await request(app).get("/api/images")).body.total_images, 3);
 
     assert.equal((await request(app).delete(`/api/admin/registrations/${ids[0]}`).set(auth())).status, 204);
     assert.equal((await request(app).get("/api/images")).body.total_images, 2);
@@ -229,6 +239,38 @@ describe("CMS", () => {
     assert.equal(res.status, 200);
     const bad = await request(app).put("/api/admin/settings").set(auth()).send({ unknown_key: 1 });
     assert.equal(bad.status, 400);
+  });
+
+  test("the admin force-open switch opens a closed registration, and turning it off closes it at once", async () => {
+    const { env } = await import("../src/config/env.js");
+    const put = (body) => request(app).put("/api/admin/settings").set(auth()).send(body);
+    const isOpen = async () => (await request(app).get("/api/settings")).body.data.registration_status.open;
+    const before = (await request(app).get("/api/admin/settings").set(auth())).body.data.registration;
+    env.REGISTRATION_FORCE_OPEN = false; // tests force registration open in .env; switch that off to test the admin switch alone
+    try {
+      await put({ registration: { ...before, enabled: false }, registration_force_open: false });
+      assert.equal(await isOpen(), false);
+      assert.equal((await register({ phone: "9833333333" }, await makePhoto())).status, 403);
+
+      const on = await put({ registration_force_open: true });
+      assert.equal(on.status, 200);
+      assert.equal(on.body.data.registration_force_open, true);
+      assert.deepEqual([on.body.meta.registration_status.open, on.body.meta.registration_status.forcedOpen], [true, true]);
+      assert.equal(on.body.meta.registration_force_open_env, false);
+      assert.equal(await isOpen(), true);
+      assert.equal((await register({ phone: "9833333333" }, await makePhoto())).status, 201);
+
+      assert.equal((await put({ registration_force_open: false })).status, 200);
+      assert.equal(await isOpen(), false);
+
+      const pub = await request(app).get("/api/settings");
+      assert.equal(pub.body.data.registration_force_open, undefined); // admin-only
+      assert.equal(pub.headers["cache-control"], "no-cache"); // the website sees the switch at once
+      assert.equal((await put({ registration_force_open: "yes" })).status, 400);
+    } finally {
+      env.REGISTRATION_FORCE_OPEN = true;
+      await put({ registration: before, registration_force_open: false });
+    }
   });
 
   test("important dates are validated, saved and public", async () => {

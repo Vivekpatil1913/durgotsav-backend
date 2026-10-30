@@ -115,6 +115,58 @@ const STEPS = [
     label: `drop ${name} (superseded)`,
     sql: `DROP INDEX CONCURRENTLY IF EXISTS ${name}`,
   })),
+  // Public gallery / photo album — mirrors migrations/030_gallery_scale_indexes.sql
+  {
+    label: "registration_photos_gallery_idx (gallery — selected photos, newest first)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS registration_photos_gallery_idx
+          ON registration_photos (id DESC) INCLUDE (registration_id)
+          WHERE is_current AND position = 1 AND is_featured`,
+  },
+  {
+    label: "registrations_verified_geo_idx (gallery — verified + district/fort filter)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS registrations_verified_geo_idx
+          ON registrations (id) INCLUDE (district_id, fort_id)
+          WHERE status = 'verified' AND deleted_at IS NULL`,
+  },
+  {
+    label: "registrations_verified_district_fort_idx (gallery — district / district + fort)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS registrations_verified_district_fort_idx
+          ON registrations (district_id, fort_id, id)
+          WHERE status = 'verified' AND deleted_at IS NULL`,
+  },
+  {
+    label: "registrations_verified_fort_idx (gallery — fort filter)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS registrations_verified_fort_idx
+          ON registrations (fort_id, id)
+          WHERE status = 'verified' AND deleted_at IS NULL`,
+  },
+  {
+    label: "registration_photos_selected_reg_idx (gallery — registration → selected photo)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS registration_photos_selected_reg_idx
+          ON registration_photos (registration_id) INCLUDE (id)
+          WHERE is_current AND position = 1 AND is_featured`,
+  },
+  // Admin column-header sorting — mirrors migrations/031_admin_sort_indexes.sql
+  {
+    label: "registrations_name_sort_idx (admin — sort by name)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS registrations_name_sort_idx
+          ON registrations (name, id)
+          WHERE deleted_at IS NULL`,
+  },
+  {
+    label: "registrations_status_sort_idx (admin — sort by status)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS registrations_status_sort_idx
+          ON registrations (status, created_at, id)
+          WHERE deleted_at IS NULL`,
+  },
+  {
+    label: "audit_logs_action_sort_idx (audit log — sort by action)",
+    sql: "CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_logs_action_sort_idx ON audit_logs (action, id)",
+  },
+  {
+    label: "audit_logs_entity_sort_idx (audit log — sort by record type)",
+    sql: "CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_logs_entity_sort_idx ON audit_logs (entity, id)",
+  },
 ];
 
 const ANALYZE = [

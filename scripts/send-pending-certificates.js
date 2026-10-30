@@ -1,18 +1,18 @@
-// Emails the certificate to every verified registration that has an email address and has not received one.
+// Queues the certificate email for every verified registration with an email address that has not received one,
+// then sends everything that is due and exits. Safe while the API's worker runs: each claims different emails.
 import { env } from "../src/config/env.js";
 import { pool } from "../src/db/pool.js";
-import { notify, pendingEmailIds } from "../src/modules/certificates/certificates.service.js";
+import { queuePending } from "../src/modules/certificates/certificates.service.js";
+import { drainQueue } from "../src/modules/certificates/certificate.worker.js";
+import { closeMail } from "../src/services/mail.service.js";
 
 if (!env.mailEnabled) {
   console.error("Email is off: set SMTP_HOST, SMTP_USER and SMTP_PASSWORD in backend/.env");
   process.exit(1);
 }
-const ids = await pendingEmailIds();
-let sent = 0;
-for (const id of ids) {
-  const result = await notify(id);
-  if (result.email) sent++;
-  else console.error(`Registration ${id}: email not sent (see log)`);
-}
-console.log(`Sent ${sent} of ${ids.length} pending certificate email(s)`);
+console.log(`Queued ${await queuePending(null)} certificate email(s)`);
+const totals = await drainQueue();
+console.log(`Sent ${totals.sent}, retry later ${totals.retry}, failed ${totals.failed}, no email ${totals.skipped}, cancelled ${totals.cancelled}`);
+if (totals.retry || totals.failed) console.error("Some emails were not sent — see Admin → Certificates (email log) or the server log");
+closeMail();
 await pool.end();

@@ -39,6 +39,16 @@ const schema = z.object({
   MAIL_FROM: z.string().optional().default(""),
   CONTACT_NOTIFY_EMAIL: z.string().optional().default(""),
 
+  // Certificate emails go through a queue (certificate_email_jobs). "embedded": the API process also runs the
+  // delivery worker. "off": a separate `npm run certificates:worker` process does it (recommended in production).
+  CERTIFICATE_WORKER: z.enum(["embedded", "off"]).default("embedded"),
+  // Certificates rendered and emailed at the same time per worker process (also the SMTP connection pool size)
+  CERTIFICATE_WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(20).default(4),
+  // Emails per minute per worker process; 0 = no limit. Keep it under the SMTP provider's sending quota.
+  CERTIFICATE_EMAIL_RATE_PER_MINUTE: z.coerce.number().int().min(0).default(0),
+  // Attempts per email before it is marked failed (retries back off: 1, 5, 15, 60, 180 … minutes)
+  CERTIFICATE_EMAIL_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(6),
+
   SMS_DRIVER: z.enum(["log"]).default("log"),
 
   // Participant originals: "s3" (private bucket, EC2 instance role) or "local" (storage/originals, dev/tests)

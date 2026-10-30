@@ -1,6 +1,6 @@
 import { query, withTransaction } from "../../db/pool.js";
 import { badRequest, conflict, notFound } from "../../utils/errors.js";
-import { paginate, pageMeta } from "../../utils/pagination.js";
+import { paginate, pageMeta, sortSql } from "../../utils/pagination.js";
 
 // With table alias — used in SELECT queries that JOIN admins
 const ROLE_FIELDS = "r.id, r.name, r.slug, r.description, r.permissions, r.is_admin, r.is_system, r.sort_order, r.created_at, r.updated_at, r.deleted_at";
@@ -9,7 +9,14 @@ const ROLE_COLS   = "id, name, slug, description, permissions, is_admin, is_syst
 
 // ---------------------------------------------------------------- roles
 
-export async function listRoles() {
+// Column-header sorts; without one, roles keep their display order
+export const ROLE_SORTS = {
+  name:       { cols: "r.name, r.id", dir: "asc" },
+  slug:       { cols: "r.slug, r.id", dir: "asc" },
+  user_count: { cols: "user_count, r.id", dir: "desc" },
+};
+
+export async function listRoles(sort = {}) {
   const { rows } = await query(
     `SELECT ${ROLE_FIELDS},
             COUNT(a.id) FILTER (WHERE a.deleted_at IS NULL AND a.is_active)::int AS user_count
@@ -17,7 +24,7 @@ export async function listRoles() {
      LEFT JOIN admins a ON a.role_id = r.id
      WHERE r.deleted_at IS NULL
      GROUP BY r.id
-     ORDER BY r.sort_order, r.id`,
+     ORDER BY ${sort.sort ? sortSql(ROLE_SORTS, sort) : "r.sort_order, r.id"}`,
   );
   return rows;
 }

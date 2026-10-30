@@ -15,6 +15,7 @@ set -euo pipefail   # exit on any error, undefined var, or pipe failure
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PM2_APP_NAME="durgotsav-api"   # change if your pm2 process has a different name
+PM2_WORKER_NAME="durgotsav-cert-worker"
 LOG_FILE="$APP_DIR/logs/deploy.log"
 TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
 
@@ -54,6 +55,11 @@ if pm2 list | grep -q "$PM2_APP_NAME"; then
 else
   warn "pm2 process '$PM2_APP_NAME' not found. Starting fresh..."
   pm2 start src/server.js --name "$PM2_APP_NAME" --time 2>&1 | tee -a "$LOG_FILE"
+fi
+# Certificate email worker, when run as its own process (CERTIFICATE_WORKER=off for the API). First start:
+#   pm2 start scripts/certificate-worker.js --name durgotsav-cert-worker --time --kill-timeout 30000
+if pm2 list | grep -q "$PM2_WORKER_NAME"; then
+  pm2 reload "$PM2_WORKER_NAME" --update-env 2>&1 | tee -a "$LOG_FILE"
 fi
 
 # ── 6. Health check ───────────────────────────────────────────────────────────

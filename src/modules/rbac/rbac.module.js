@@ -4,6 +4,7 @@ import { checkPermission } from "../../middleware/permission.js";
 import { validate } from "../../middleware/validate.js";
 import { audit } from "../../services/audit.service.js";
 import { asyncHandler, badRequest } from "../../utils/errors.js";
+import { sortParams } from "../../utils/pagination.js";
 import * as rbac from "./rbac.service.js";
 import { createRoleSchema, districtIdsSchema, divisionIdsSchema, updateRoleSchema } from "./rbac.schemas.js";
 import { permissionCatalogue } from "./permissions.registry.js";
@@ -20,8 +21,9 @@ router.get("/catalogue", checkPermission("roles", "read"), asyncHandler(async (_
 // ---------------------------------------------------------------- role CRUD
 router.get("/",
   checkPermission("roles", "read"),
-  asyncHandler(async (_req, res) => {
-    res.json({ data: await rbac.listRoles() });
+  validate({ query: z.object(sortParams(Object.keys(rbac.ROLE_SORTS))) }),
+  asyncHandler(async (req, res) => {
+    res.json({ data: await rbac.listRoles(req.query) });
   }),
 );
 

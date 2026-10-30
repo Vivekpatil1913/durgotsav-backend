@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { EDITION_YEAR } from "../config/edition.js";
+import { env } from "../config/env.js";
 import { query } from "../db/pool.js";
 import { authenticate } from "../middleware/auth.js";
 import { checkExplicitPermission, checkPermission, scopeToAdminDivisions } from "../middleware/permission.js";
@@ -10,7 +11,7 @@ import { audit } from "../services/audit.service.js";
 import { storeContentImage } from "../services/image.service.js";
 import { asyncHandler, badRequest } from "../utils/errors.js";
 import { formatRegistrationNo } from "../utils/format.js";
-import { paginate, pageMeta, paginationSchema } from "../utils/pagination.js";
+import { paginate, pageMeta, paginationSchema, sortParams, sortSql } from "../utils/pagination.js";
 import { adminsRouter } from "../modules/auth/auth.module.js";
 import { rbacRouter } from "../modules/rbac/rbac.module.js";
 import { adminAwardRouter } from "../modules/award/award.routes.js";
@@ -19,9 +20,10 @@ import {
   adminListSchema, bulkReviewSchema, featureSchema, reviewSchema, updateRegistrationSchema,
 } from "../modules/registrations/registrations.schemas.js";
 import * as certificates from "../modules/certificates/certificates.service.js";
+import { wakeCertificateWorker } from "../modules/certificates/certificate.worker.js";
 import * as galleryService from "../modules/gallery/gallery.service.js";
 import * as stats from "../modules/stats/stats.service.js";
-import { getAllSettings, updateSettings } from "../modules/settings/settings.service.js";
+import { getAllSettings, registrationWindow, updateSettings } from "../modules/settings/settings.service.js";
 import { settingsUpdateSchema } from "../modules/settings/settings.definitions.js";
 import { forts, fortImagesRouter } from "../modules/forts/forts.module.js";
 import {
@@ -43,6 +45,7 @@ router.get("/stats/dashboard",
 const districtStatsSchema = z.object({
   page:  z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(10),
+  ...sortParams(Object.keys(stats.DISTRICT_SORTS), "total"),
 });
 
 router.get("/stats/districts",
@@ -55,6 +58,7 @@ router.get("/stats/districts",
 const divisionStatsSchema = z.object({
   page:  z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(10),
+  ...sortParams(Object.keys(stats.DIVISION_SORTS), "total"),
 });
 
 router.get("/stats/divisions",
@@ -67,8 +71,7 @@ router.get("/stats/divisions",
 const cityStatsSchema = z.object({
   page:     z.coerce.number().int().min(1).default(1),
   limit:    z.coerce.number().int().min(1).max(100).default(25),
-  sort:     z.enum(["city", "registrations", "uploaded", "verified", "pending", "rejected", "certificates"]).default("registrations"),
-  dir:      z.enum(["asc", "desc"]).default("desc"),
+  ...sortParams(Object.keys(stats.CITY_SORTS), "registrations"),
   district: z.string().max(120).optional(),
 });
 
@@ -91,7 +94,7 @@ reg.get("/export.csv",
   checkPermission("reports", "write"),
   validate({ query: adminListSchema }),
   asyncHandler(async (req, res) => {
-    const cols = ["registration_no", "name", "participant_type", "organization_name", "members_count", "phone", "email", "country", "district", "city", "fort", "status", "review_note", "certificate_no", "created_at"];
+    const cols = ["registration_no", "name", "participant_type", "organization_name", "members_count", "phone", "whatsapp_number", "email", "country", "district", "city", "fort", "status", "review_note", "certificate_no", "created_at"];
     const cell = (v) => {
       let s = v instanceof Date ? v.toISOString() : String(v ?? "");
       if (/^[=+\-@]/.test(s)) s = `'${s}`;
@@ -125,7 +128,8 @@ reg.post("/bulk-review",
     const changed = await registrations.review(
       req.body.ids, req.body.action, req.body.note, req.admin.id, req.allowedDivisionIds);
     changed.forEach((id) => audit(req, req.body.action, "registration", id, { bulk: true, note: req.body.note }));
-    if (req.body.action === "verify") certificates.notifyInBackground(changed);
+    if (req.body.action === "verify") wakeCertificateWorker(); // emails were queued in the review transaction
+    if (req.body.action === "reject") registrations.emailRejections(changed); // background; logs its own failures
     res.json({ data: { updated: changed } });
   }));
 
@@ -142,6 +146,14 @@ reg.get("/:id",
   validate({ params: idParams }),
   asyncHandler(async (req, res) =>
     res.json({ data: await registrations.adminDetail(req.params.id, req.allowedDivisionIds) })));
+
+// Previous / next record and position in a list with these filters (the review queue's Previous / Next)
+reg.get("/:id/neighbors",
+  validate({ params: idParams, query: adminListSchema }),
+  asyncHandler(async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    res.json({ data: await registrations.neighbors(req.params.id, req.query, req.allowedDivisionIds) });
+  }));
 
 reg.get("/:id/photos/:photoId/original",
   checkPermission("registrations_photos", "read"),
@@ -168,7 +180,8 @@ reg.post("/:id/review",
       [req.params.id], req.body.action, req.body.note, req.admin.id, req.allowedDivisionIds);
     if (!changed.length) throw badRequest("Registration not found or deleted");
     audit(req, req.body.action, "registration", req.params.id, { note: req.body.note });
-    if (req.body.action === "verify") certificates.notifyInBackground(changed);
+    if (req.body.action === "verify") wakeCertificateWorker(); // emails were queued in the review transaction
+    if (req.body.action === "reject") registrations.emailRejections(changed); // background; logs its own failures
     res.json({ data: await registrations.adminDetail(req.params.id, req.allowedDivisionIds) });
   }));
 
@@ -200,8 +213,16 @@ cert.get("/", validate({
     q: z.string().trim().max(100).optional(),
     state: z.enum(["valid", "revoked"]).optional(),
     emailed: z.enum(["yes", "no"]).optional(),
+    email_status: z.enum(["queued", "processing", "sent", "failed", "skipped", "cancelled", "none"]).optional(),
+    ...sortParams(Object.keys(certificates.ADMIN_SORTS), "issued_at"),
   }),
 }), asyncHandler(async (req, res) => res.json(await certificates.adminList(req.query))));
+
+// Email queue health: counts per status, next due time, recent throughput
+cert.get("/email-queue", asyncHandler(async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.json({ data: { ...(await certificates.emailQueueStats()), mail_enabled: env.mailEnabled } });
+}));
 
 cert.get("/:id/pdf", validate({ params: idParams }),
   asyncHandler(async (req, res) => {
@@ -210,20 +231,34 @@ cert.get("/:id/pdf", validate({ params: idParams }),
     res.send(await certificates.renderPdf(c));
   }));
 
+// Every delivery attempt for one certificate (what was sent, to whom, SMTP's answer or the error)
+cert.get("/:id/email-log", validate({ params: idParams }),
+  asyncHandler(async (req, res) => res.json({ data: await certificates.deliveryLog(req.params.id) })));
+
 cert.post("/:id/resend", validate({ params: idParams }),
   asyncHandler(async (req, res) => {
-    const result = await certificates.notify(req.params.id);
-    audit(req, "resend", "certificate", req.params.id, result);
-    res.json({ data: result });
+    const status = await certificates.resend(req.params.id, req.admin.id);
+    audit(req, "resend", "certificate", req.params.id, { status });
+    wakeCertificateWorker();
+    res.json({ data: { status } });
   }));
 
 cert.post("/send-pending",
   checkPermission("certificates", "write"),
   asyncHandler(async (req, res) => {
-    const ids = await certificates.pendingEmailIds();
-    certificates.notifyInBackground(ids);
-    audit(req, "send_pending", "certificate", null, { count: ids.length });
-    res.json({ data: { queued: ids.length } });
+    const queued = await certificates.queuePending(req.admin.id);
+    audit(req, "send_pending", "certificate", null, { count: queued });
+    wakeCertificateWorker();
+    res.json({ data: { queued } });
+  }));
+
+cert.post("/retry-failed",
+  checkPermission("certificates", "write"),
+  asyncHandler(async (req, res) => {
+    const queued = await certificates.retryFailed(req.admin.id);
+    audit(req, "retry_failed", "certificate", null, { count: queued });
+    wakeCertificateWorker();
+    res.json({ data: { queued } });
   }));
 
 cert.post("/:id/revoke",
@@ -239,8 +274,9 @@ cert.post("/:id/reinstate",
   checkPermission("certificates", "write"),
   validate({ params: idParams }),
   asyncHandler(async (req, res) => {
-    await certificates.reinstate(req.params.id);
+    await certificates.reinstate(req.params.id, req.admin.id);
     audit(req, "reinstate", "certificate", req.params.id);
+    wakeCertificateWorker();
     res.json({ ok: true });
   }));
 router.use("/certificates", cert);
@@ -345,25 +381,41 @@ router.post("/uploads",
   }));
 
 // ------------------------------------------------------------- settings
-router.get("/settings",  checkPermission("settings", "read"),  asyncHandler(async (req, res) => {
+// meta: whether the registration form is open right now, and whether .env forces it open (the admin switch can't close it then)
+async function settingsResponse() {
   const rows = await getAllSettings();
-  res.json({ data: Object.fromEntries(rows.map((r) => [r.key, r.value])) });
+  return {
+    data: Object.fromEntries(rows.map((r) => [r.key, r.value])),
+    meta: { registration_status: await registrationWindow(), registration_force_open_env: env.REGISTRATION_FORCE_OPEN },
+  };
+}
+
+router.get("/settings",  checkPermission("settings", "read"),  asyncHandler(async (req, res) => {
+  res.json(await settingsResponse());
 }));
 
 router.put("/settings",  checkPermission("settings", "write"), validate({ body: settingsUpdateSchema }),
   asyncHandler(async (req, res) => {
     await updateSettings(req.body, req.admin.id);
-    audit(req, "update", "settings", null, { keys: Object.keys(req.body) });
-    const rows = await getAllSettings();
-    res.json({ data: Object.fromEntries(rows.map((r) => [r.key, r.value])) });
+    // The force-open switch is recorded with its new value, so the audit log shows who opened or closed registration
+    audit(req, "update", "settings", null, { keys: Object.keys(req.body), ...("registration_force_open" in req.body && { registration_force_open: req.body.registration_force_open }) });
+    res.json(await settingsResponse());
   }));
 
 // ------------------------------------------------------------- audit logs
+// ids rise with created_at, so "When" sorts on the primary key; action / entity have (column, id) indexes (migration 031)
+const AUDIT_SORTS = {
+  created_at: { cols: "l.id", dir: "desc" },
+  action: { cols: "l.action, l.id", dir: "asc" },
+  entity: { cols: "l.entity, l.id", dir: "asc" },
+};
+
 router.get("/audit-logs", checkPermission("audit_logs", "read"), validate({
   query: paginationSchema.extend({
     entity:   z.string().max(60).optional(),
     action:   z.string().max(60).optional(),
     admin_id: z.coerce.number().int().positive().optional(),
+    ...sortParams(Object.keys(AUDIT_SORTS), "created_at"),
   }),
 }), asyncHandler(async (req, res) => {
   const where = [];
@@ -378,7 +430,7 @@ router.get("/audit-logs", checkPermission("audit_logs", "read"), validate({
   const [list, count] = await Promise.all([
     query(
       `SELECT l.*, a.name AS admin_name, a.email AS admin_email FROM audit_logs l
-       LEFT JOIN admins a ON a.id = l.admin_id ${sqlWhere} ORDER BY l.id DESC LIMIT ${limit} OFFSET ${offset}`,
+       LEFT JOIN admins a ON a.id = l.admin_id ${sqlWhere} ORDER BY ${sortSql(AUDIT_SORTS, req.query, "created_at")} LIMIT ${limit} OFFSET ${offset}`,
       params,
     ),
     query(`SELECT COUNT(*)::int AS total FROM audit_logs l ${sqlWhere}`, params),

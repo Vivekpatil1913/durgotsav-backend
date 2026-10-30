@@ -5,7 +5,7 @@ import { authorize } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validate.js";
 import { audit } from "../../services/audit.service.js";
 import { asyncHandler, badRequest, notFound } from "../../utils/errors.js";
-import { paginate, pageMeta, paginationSchema } from "../../utils/pagination.js";
+import { paginate, pageMeta, paginationSchema, sortParams, sortSql } from "../../utils/pagination.js";
 
 const idParams = z.object({ id: z.coerce.number().int().positive() });
 const boolish = z.enum(["true", "false"]).transform((v) => v === "true").optional();
@@ -24,6 +24,7 @@ const boolish = z.enum(["true", "false"]).transform((v) => v === "true").optiona
  * @param {string[]} [cfg.searchable]       columns matched with ILIKE by ?q=
  * @param {Record<string,'bool'|'string'>} [cfg.filters]  extra ?column= filters
  * @param {string} [cfg.order]              admin ORDER BY
+ * @param {string[]} [cfg.sortable]         columns ?sort= may name besides `schema`'s keys (column-header sorting)
  * @param {string[]} [cfg.jsonFields]       JSONB columns (must be stringified for pg)
  * @param {boolean} [cfg.softDelete=true]
  * @param {boolean} [cfg.hasSortOrder=true]
@@ -40,10 +41,14 @@ export function createCrud(cfg) {
   } = cfg;
   const updateSchema = cfg.updateSchema ?? schema.partial();
   const live = softDelete ? "deleted_at IS NULL" : "TRUE";
+  // CMS tables are small, so any listed column can sort without an index; without ?sort= the list keeps `order`
+  const sorts = Object.fromEntries([...Object.keys(schema.shape ?? {}), ...(cfg.sortable ?? [])]
+    .map((c) => [c, { cols: `${c}, id`, dir: "asc", nullsLast: true }]));
 
   const listSchema = paginationSchema.extend({
     q: z.string().trim().max(100).optional(),
     trashed: boolish,
+    ...(Object.keys(sorts).length ? sortParams(Object.keys(sorts)) : {}),
     ...Object.fromEntries(Object.entries(filters).map(([k, t]) => [k, t === "bool" ? boolish : z.string().max(60).optional()])),
   });
 
@@ -66,7 +71,7 @@ export function createCrud(cfg) {
       const { limit, offset } = paginate(f);
       const sqlWhere = `WHERE ${where.join(" AND ")}`;
       const [rows, count] = await Promise.all([
-        query(`SELECT * FROM ${table} ${sqlWhere} ORDER BY ${order} LIMIT ${limit} OFFSET ${offset}`, params),
+        query(`SELECT * FROM ${table} ${sqlWhere} ORDER BY ${f.sort ? sortSql(sorts, f) : order} LIMIT ${limit} OFFSET ${offset}`, params),
         query(`SELECT COUNT(*)::int AS total FROM ${table} ${sqlWhere}`, params),
       ]);
       return { data: rows.rows, meta: pageMeta(f, count.rows[0].total) };

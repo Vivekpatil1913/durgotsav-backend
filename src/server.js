@@ -2,6 +2,7 @@ import { createApp } from "./app.js";
 import { EDITION_YEAR } from "./config/edition.js";
 import { env } from "./config/env.js";
 import { pool } from "./db/pool.js";
+import { startCertificateWorker, stopCertificateWorker } from "./modules/certificates/certificate.worker.js";
 import { checkS3Credentials } from "./services/s3.service.js";
 import { logger } from "./utils/logger.js";
 
@@ -9,6 +10,8 @@ const app = createApp();
 const server = app.listen(env.PORT, () => {
   logger.info(`Durgotsav ${EDITION_YEAR} API listening on ${env.API_URL} (db: ${env.DB_NAME})`);
   if (!env.mailEnabled) logger.warn("Email is OFF — set SMTP_PASSWORD (Gmail App Password) in .env to send certificates");
+  if (env.CERTIFICATE_WORKER === "embedded") startCertificateWorker();
+  else logger.info("CERTIFICATE_WORKER=off — certificate emails are sent by `npm run certificates:worker`");
   if (env.REGISTRATION_FORCE_OPEN) logger.warn("REGISTRATION_FORCE_OPEN=true — registration window in settings is ignored");
   if (env.PARTICIPANT_IMAGE_STORAGE === "s3") {
     logger.info(`Participant photo originals → s3://${env.AWS_S3_BUCKET_NAME} (${env.AWS_REGION})`);
@@ -21,6 +24,7 @@ const server = app.listen(env.PORT, () => {
 async function shutdown(signal) {
   logger.info(`${signal} received, shutting down`);
   server.close(async () => {
+    await stopCertificateWorker();
     await pool.end();
     process.exit(0);
   });

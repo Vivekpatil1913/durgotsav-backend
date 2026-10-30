@@ -11,19 +11,33 @@ function transport() {
     port: env.SMTP_PORT,
     secure: env.SMTP_SECURE,
     auth: { user: env.SMTP_USER, pass: env.SMTP_PASSWORD },
+    // Reuse connections: bulk certificate delivery does not open a new TLS session per email
+    pool: true,
+    maxConnections: env.CERTIFICATE_WORKER_CONCURRENCY,
+    maxMessages: 100,
+    // Fail rather than hang, so a stuck connection cannot hold a queued certificate past its lease
+    connectionTimeout: 30_000,
+    greetingTimeout: 30_000,
+    socketTimeout: 60_000,
   });
   return transporter;
 }
 
-// Returns true when the mail was handed to SMTP, false when email is switched off (logged instead).
+// Returns nodemailer's info ({ messageId, response, … }) once SMTP accepted the mail,
+// false when email is switched off (logged instead).
 export async function sendMail({ to, subject, html, attachments }) {
   const t = transport();
   if (!t) {
     logger.info({ to, subject }, "Email disabled (SMTP_PASSWORD empty) — message not sent");
     return false;
   }
-  await t.sendMail({ from: env.MAIL_FROM || env.SMTP_USER, to, subject, html, attachments });
-  return true;
+  return t.sendMail({ from: env.MAIL_FROM || env.SMTP_USER, to, subject, html, attachments });
+}
+
+// Closes pooled SMTP connections (scripts call this so the process can exit)
+export function closeMail() {
+  transporter?.close();
+  transporter = undefined;
 }
 
 export const escapeHtml = (s) =>
