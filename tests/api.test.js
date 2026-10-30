@@ -98,6 +98,7 @@ describe("registration → verification → certificate", () => {
     assert.equal(res.status, 201, JSON.stringify(res.body));
     reg = res.body.data;
     assert.match(reg.registration_no, new RegExp(`^${NUMBER_PREFIX}-\\d{6}$`));
+    assert.equal(reg.registration_no, `${NUMBER_PREFIX}-010000`, "registration numbers start at 10000 (migration 032)");
     assert.equal(reg.status, "pending");
 
     const detail = await request(app).get(`/api/admin/registrations/${reg.id}`).set(auth());
