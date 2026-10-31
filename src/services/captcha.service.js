@@ -16,7 +16,7 @@ export const captchaEnabled = () => env.CAPTCHA_PROVIDER !== "off";
 export const publicCaptcha = () => (captchaEnabled() ? { provider: env.CAPTCHA_PROVIDER, site_key: env.CAPTCHA_SITE_KEY } : null);
 
 export async function verifyCaptcha(token, remoteIp) {
-  // Development only (env.js refuses it in production): the website's static checkbox, nobody to ask
+  // The website's own look-alike checkbox: nobody to ask, any tick passes
   if (env.CAPTCHA_PROVIDER === "dummy") return { ok: true, codes: [] };
   const body = new URLSearchParams({ secret: env.CAPTCHA_SECRET_KEY, response: token });
   if (remoteIp) body.set("remoteip", remoteIp);

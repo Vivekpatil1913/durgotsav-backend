@@ -39,6 +39,8 @@ export function errorHandler(err, req, res, next) {
     return res.status(503).json({ error: { code: "BUSY", message: "The server is busy. Please try again in a few seconds" } });
   }
   if (err instanceof AppError) {
+    // A refusal for load (render pool full, a render timed out) tells the browser when to try again
+    if (err.status === 503 && !res.get("Retry-After")) res.set("Retry-After", "5");
     return res.status(err.status).json({ error: { code: err.code, message: err.message, details: err.details } });
   }
   // Client errors raised by Express middleware, e.g. a missing /uploads file (serve-static) or an aborted body

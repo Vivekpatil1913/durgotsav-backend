@@ -2,6 +2,9 @@
 // approves, any number of registrations per mobile, paginated mobile lookup with PDF / image / "download all",
 // participant links, CAPTCHA gate, SMS through a durable queue, admin regenerate / manual SMS.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { after, before, describe, test } from "node:test";
 import sharp from "sharp";
 import request from "supertest";
@@ -104,7 +107,8 @@ describe("single-page form; the certificate only after an admin approves", () =>
     assert.equal(cert.durgveer_no, 10000);
     assert.equal(cert.revoked_at, null);
     const { rows: [job] } = await pool.query("SELECT reason, status FROM certificate_email_jobs WHERE certificate_id = $1", [cert.id]);
-    assert.deepEqual(job, { reason: "verify", status: "queued" });
+    // This participant gave no email address: the job is recorded as skipped at once, without a worker round trip
+    assert.deepEqual(job, { reason: "verify", status: "skipped" });
     const [smsRow] = await smsOf(first.id, "certificate_link");
     assert.equal(smsRow.status, "queued");
     assert.ok(smsRow.message.includes(`/c/${first.token}`));
@@ -338,7 +342,7 @@ describe("'I am not a robot' (CAPTCHA)", () => {
     assert.equal(res.body.data.length, 1);
   });
 
-  test("dummy (development): a tick is still required, but no provider is asked", async () => {
+  test("dummy: a tick is still required, but no provider is asked", async () => {
     env.CAPTCHA_PROVIDER = "dummy";
     try {
       calls.length = 0;
@@ -350,6 +354,19 @@ describe("'I am not a robot' (CAPTCHA)", () => {
     } finally {
       env.CAPTCHA_PROVIDER = "recaptcha";
     }
+  });
+
+  test("production starts with dummy (no keys); Google / Cloudflare without keys is refused", () => {
+    const start = (provider) => spawnSync(process.execPath, ["--input-type=module", "-e", "await import('./src/config/env.js')"], {
+      cwd: path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
+      env: { ...process.env, NODE_ENV: "production", CAPTCHA_PROVIDER: provider, CAPTCHA_SITE_KEY: "", CAPTCHA_SECRET_KEY: "", PARTICIPANT_IMAGE_STORAGE: "local", AWARD_DOCUMENT_STORAGE: "local" },
+      encoding: "utf8",
+    });
+    const dummy = start("dummy");
+    assert.equal(dummy.status, 0, dummy.stderr);
+    const recaptcha = start("recaptcha");
+    assert.notEqual(recaptcha.status, 0);
+    assert.match(recaptcha.stderr, /CAPTCHA_SITE_KEY and CAPTCHA_SECRET_KEY are required in production/);
   });
 });
 

@@ -251,7 +251,7 @@ export const awardWinners = createCrud({
 });
 
 // The website's award section is cached for a short while (award.publicInfo): a saved member or winner clears it, so the
-// change shows at once on this instance and within the cache time on the others
+// change shows at once on this instance; the others refresh their copy once it is older than the cache time
 const refreshPublicInfo = (req, res, next) => {
   if (req.method !== "GET") res.once("finish", award.clearInfoCache);
   next();

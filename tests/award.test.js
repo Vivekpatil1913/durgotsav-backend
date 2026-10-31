@@ -257,6 +257,22 @@ describe("nomination submission", () => {
     }
   });
 
+  test("a name or link longer than its database column is a field error, not a server error", async () => {
+    // An individual's name is stored in a 160-character column, an organization's website in a 500-character one
+    const long = "अ".repeat(200);
+    const person = await submit(individual({ nominee_name: long }));
+    assert.equal(person.status, 400, JSON.stringify(person.body));
+    assert.ok(person.body.error.details.nominee_name);
+    const site = await submit(organization({ website_url: `https://example.org/${"a".repeat(600)}` }));
+    assert.equal(site.status, 400, JSON.stringify(site.body));
+    assert.ok(site.body.error.details.website_url);
+    // An organization's name keeps its 250 characters, an evidence link its 1,000
+    const { nominationSchema } = await import("../src/modules/award/award.schemas.js");
+    assert.ok(nominationSchema.safeParse(organization({ nominee_name: long })).success);
+    const link = `https://example.org/${"a".repeat(900)}`;
+    assert.ok(nominationSchema.safeParse(individual({ documents: [{ title: "लेख", external_url: link }] })).success);
+  });
+
   test("organization fields are refused on an individual nomination (no mass assignment)", async () => {
     const res = await submit(individual({ status: "selected" }));
     assert.equal(res.status, 400);
@@ -425,6 +441,45 @@ describe("admin award section", () => {
     assert.equal(res.body.data.totals.individual, count.individual);
     assert.equal(res.body.data.totals.organization, count.organization);
     assert.equal(res.body.data.totals.submitted, count.individual + count.organization);
+  });
+
+  test("concurrent dashboard loads share one computation, and the figures shown are never older than STATS_TTL", async () => {
+    // A past edition of its own, so nothing about it is cached yet
+    const { rows: [{ id: edition }] } = await pool.query(`INSERT INTO award_editions (year, reference_prefix, title,
+      nomination_opens_at, nomination_closes_at, prize_individual, prize_organization)
+      VALUES (2025, 'ASBP25', 'Award 2025', '2025-10-01', '2025-10-31', '-', '-') RETURNING id`);
+    const nominate = () => pool.query(`
+      WITH nm AS (INSERT INTO award_nominators (full_name, mobile) VALUES ('Past nominator', '9876500080') RETURNING id)
+      INSERT INTO award_nominations (edition_id, nominator_id, category, submission_id, nominee_name, mobile, email, address,
+        district_id, taluka_id, work_started_year, declaration_place, declaration_date, declaration_name, declaration_accepted_at)
+      SELECT $1, nm.id, 'individual', gen_random_uuid(), 'Past nominee', '9876500081', 'past@example.com', 'Pune', $2, $3, 2000,
+        'Pune', CURRENT_DATE, 'Past nominator', NOW() FROM nm`, [edition, district, taluka]);
+    const { reportPool } = await import("../src/db/pool.js");
+    const realNow = Date.now;
+    const reportQuery = reportPool.query;
+    let queries = 0;
+    try {
+      await nominate();
+      // Three admins opened the dashboard together, ten minutes ago
+      Date.now = () => realNow() - 10 * 60_000;
+      reportPool.query = function counted(...args) {
+        queries += 1;
+        return reportQuery.apply(this, args);
+      };
+      const loads = await Promise.all([1, 2, 3].map(() => award.stats(edition)));
+      assert.deepEqual(loads.map((s) => s.totals.total), [1, 1, 1]);
+      assert.equal(queries, 4, "one set of aggregates for all three");
+      Date.now = realNow;
+      // A nomination has arrived since: the next load waits for fresh figures instead of showing the old ones
+      await nominate();
+      assert.equal((await award.stats(edition)).totals.total, 2);
+    } finally {
+      Date.now = realNow;
+      reportPool.query = reportQuery;
+      await pool.query("DELETE FROM award_nominations WHERE edition_id = $1", [edition]);
+      await pool.query("DELETE FROM award_nominators WHERE full_name = 'Past nominator'");
+      await pool.query("DELETE FROM award_editions WHERE id = $1", [edition]);
+    }
   });
 
   test("lists with server-side filters, search and pagination", async () => {

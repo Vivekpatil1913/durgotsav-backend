@@ -70,8 +70,9 @@ const schema = z.object({
 
   // "I am not a robot" check on the registration form and the mobile certificate lookup (SRS §3): Google reCAPTCHA v2
   // (checkbox) or Cloudflare Turnstile. Outside production, empty keys fall back to the provider's public test keys
-  // (the widget shows, every check passes). "dummy" (development only): the website draws a static look-alike checkbox
-  // and any tick passes — no provider, no keys. "off" only for automated tests.
+  // (the widget shows, every check passes). "dummy": the website draws its own look-alike checkbox and any tick passes —
+  // no provider, no keys, and no protection against scripted submissions (the rate limits and the upload queue still
+  // apply). "off" only for automated tests.
   CAPTCHA_PROVIDER: z.enum(["recaptcha", "turnstile", "dummy", "off"]).default("recaptcha"),
   CAPTCHA_SITE_KEY: z.string().trim().default(""),
   CAPTCHA_SECRET_KEY: z.string().trim().default(""),
@@ -85,10 +86,9 @@ const schema = z.object({
   if (v.SMS_DRIVER === "http" && !(/^https?:\/\//.test(v.SMS_HTTP_URL) && v.SMS_HTTP_URL.includes("{phone}") && v.SMS_HTTP_URL.includes("{message}"))) {
     ctx.addIssue({ code: "custom", path: ["SMS_HTTP_URL"], message: "An http(s) URL containing {phone} and {message} is required when SMS_DRIVER=http" });
   }
-  if (v.NODE_ENV === "production" && v.CAPTCHA_PROVIDER === "dummy") {
-    ctx.addIssue({ code: "custom", path: ["CAPTCHA_PROVIDER"], message: "dummy is for development only: use recaptcha or turnstile with real keys in production" });
-  } else if (v.NODE_ENV === "production" && v.CAPTCHA_PROVIDER !== "off" && !(v.CAPTCHA_SITE_KEY && v.CAPTCHA_SECRET_KEY)) {
-    ctx.addIssue({ code: "custom", path: ["CAPTCHA_SECRET_KEY"], message: "CAPTCHA_SITE_KEY and CAPTCHA_SECRET_KEY are required in production" });
+  // Google / Cloudflare need the site's own keys in production (their test keys only work in development)
+  if (v.NODE_ENV === "production" && ["recaptcha", "turnstile"].includes(v.CAPTCHA_PROVIDER) && !(v.CAPTCHA_SITE_KEY && v.CAPTCHA_SECRET_KEY)) {
+    ctx.addIssue({ code: "custom", path: ["CAPTCHA_SECRET_KEY"], message: "CAPTCHA_SITE_KEY and CAPTCHA_SECRET_KEY are required in production (or CAPTCHA_PROVIDER=dummy)" });
   }
   if (v.PARTICIPANT_IMAGE_STORAGE !== "s3" && v.AWARD_DOCUMENT_STORAGE !== "s3") return;
   if (!v.AWS_REGION) ctx.addIssue({ code: "custom", path: ["AWS_REGION"], message: "Required when S3 storage is enabled" });

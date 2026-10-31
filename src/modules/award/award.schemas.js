@@ -28,9 +28,11 @@ const optPastDate = () => z.preprocess(blank, pastDate().optional());
 export const mobile = z.string({ required_error: "मोबाईल क्रमांक आवश्यक" }).trim()
   .regex(/^[6-9]\d{9}$/, "१० अंकी वैध मोबाईल क्रमांक लिहा");
 const email = z.string({ required_error: "ई-मेल आवश्यक" }).trim().toLowerCase().email("ई-मेल योग्य नाही").max(160);
-export const httpUrl = z.string().trim().max(1000, "लिंक खूप मोठी आहे")
+// http(s) links, each no longer than its column: evidence links 1,000 characters, an organization's website 500
+const urlOf = (max) => z.string().trim().max(max, "लिंक खूप मोठी आहे")
   .url("लिंक योग्य नाही (https://... ने सुरू करा)")
   .refine((v) => /^https?:\/\//i.test(v), "फक्त http / https लिंक चालतील");
+export const httpUrl = urlOf(1000);
 const optUrl = z.preprocess(blank, httpUrl.optional());
 const id = z.coerce.number({ invalid_type_error: "निवडा" }).int().positive("निवडा");
 const count = z.preprocess(blank, z.coerce.number().int("पूर्ण संख्या लिहा").min(0).max(100_000_000).optional());
@@ -93,7 +95,7 @@ export const nominationSchema = z.object({
   registration_authority: opt(200),
   pan: z.preprocess((v) => (typeof v === "string" ? blank(v.trim().toUpperCase()) : v),
     z.string().regex(/^[A-Z]{5}[0-9]{4}[A-Z]$/, "PAN योग्य नाही (उदा. ABCDE1234F)").optional()),
-  website_url: optUrl,
+  website_url: z.preprocess(blank, urlOf(500).optional()),
   pincode: z.preprocess(blank, z.string().trim().regex(/^[1-9]\d{5}$/, "६ अंकी वैध पिनकोड लिहा").optional()),
   conservation_details: longOpt(),
   research_documentation: longOpt(),
@@ -131,6 +133,8 @@ export const nominationSchema = z.object({
   if (Math.abs(d - Date.parse(`${today}T00:00:00Z`)) > 86_400_000) issue("declaration_date", "आजचा दिनांक निवडा");
 
   if (v.category === "individual") {
+    // nominee_name allows an organization's 250 characters; a person's name is also their full_name, which holds 160
+    if (v.nominee_name.length > 160) issue("nominee_name", "कमाल 160 अक्षरे");
     if (!v.father_or_husband_name) issue("father_or_husband_name", "वडिलांचे / पतीचे नाव आवश्यक");
     if (!v.date_of_birth) issue("date_of_birth", "जन्मतारीख आवश्यक");
     else {

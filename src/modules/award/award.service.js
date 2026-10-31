@@ -37,7 +37,9 @@ export function nominationWindow(edition, now = new Date()) {
 
 // The award section is on the website's home page, so its edition, committee and winners are served from memory for a
 // short while (one query set for all concurrent visitors); the open/closed status is still worked out per request.
-// Saving the configuration, a committee member or a winner clears it here; other instances catch up within INFO_TTL.
+// Saving the configuration, a committee member or a winner clears it here. Other instances refresh their copy on the
+// first request after INFO_TTL and answer that one request from the old copy (utils/cache.js), so no visitor waits;
+// a submission checks the window against the database anyway.
 const INFO_TTL = 30_000;
 const infoCache = createCache({ ttlMs: INFO_TTL, name: "award-info" });
 export const clearInfoCache = () => infoCache.clear();
@@ -358,14 +360,28 @@ export async function streamExportRows(f, edition, onBatch) {
   }
 }
 
-// Dashboard aggregates scan the whole edition, so dashboard loads share one result for STATS_TTL, computed once for
-// concurrent callers (utils/cache.js) on the report pool. New nominations and status changes show within that time.
+// Dashboard aggregates scan the whole edition, so loads within STATS_TTL of each other share one result, computed once
+// for concurrent callers on the report pool. An expired result is recomputed before it is shown (utils/cache.js would
+// show it while refreshing in the background, and on a dashboard opened now and then that is the previous visit's
+// figures, however old), so new nominations and status changes always show within STATS_TTL.
 const STATS_TTL = 30_000;
-const statsCache = createCache({ ttlMs: STATS_TTL, name: "award-stats" });
+const statsCache = new Map(); // one entry per award year
+
+function cachedCounts(editionId) {
+  const hit = statsCache.get(editionId);
+  if (hit && Date.now() - hit.at < STATS_TTL) return hit.counts;
+  const entry = { at: Date.now(), counts: countNominations(editionId) };
+  // A failed computation is not kept, so the next load tries again
+  entry.counts.catch(() => {
+    if (statsCache.get(editionId) === entry) statsCache.delete(editionId);
+  });
+  statsCache.set(editionId, entry);
+  return entry.counts;
+}
 
 export async function stats(editionId) {
   const edition = await editionFor(editionId);
-  const counts = await statsCache.get(edition.id, () => countNominations(edition.id));
+  const counts = await cachedCounts(edition.id);
   // Only the counts are cached: the title and the open/closed window are current on every load
   return { edition: { id: edition.id, year: edition.year, title: edition.title }, window: nominationWindow(edition), ...counts };
 }
