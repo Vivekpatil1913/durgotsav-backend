@@ -1,13 +1,23 @@
 import { query, withTransaction } from "../../db/pool.js";
 import { conflict, notFound } from "../../utils/errors.js";
-import { formatCertificateNo, formatRegistrationNo, parseRegistrationNo } from "../../utils/format.js";
+import { formatCertificateNo, formatRegistrationNo, latinDigits, likeContains, parseRegistrationNo } from "../../utils/format.js";
 import { logger } from "../../utils/logger.js";
 import { paginate, pageMeta, sortSql } from "../../utils/pagination.js";
-import { renderInPool } from "./certificate.render-pool.js";
+import { certificateToken, parseCertificateToken } from "./certificate.links.js";
+import { renderBundleInPool, renderInPool } from "./certificate.render-pool.js";
+import { CertificateDataError } from "./certificate.renderer.js";
 import * as emailQueue from "./certificate.queue.js";
 
+// A certificate is generated only when an admin approves the registration after checking its photo and details
+// (review action "verify"). Pending, rejected, duplicate and info-requested registrations have no valid certificate:
+// rejecting / marking duplicate / asking for more information after an approval revokes it, approving again
+// reinstates it with the same दुर्गवीर number.
+export const CERTIFIED_STATUSES = ["verified"];
+const isValid = (c) => Boolean(c) && !c.revoked_at && CERTIFIED_STATUSES.includes(c.status);
+
 const CERT_SELECT = `
-  SELECT c.*, r.id AS registration_id, r.name, r.phone, r.email, r.status, d.name_mr AS district,
+  SELECT c.*, r.id AS registration_id, r.name, r.phone, r.email, r.status, r.created_at AS registered_at,
+         r.deleted_at AS registration_deleted_at, d.name_mr AS district,
          p.image_path AS photo_path,
          j.status AS email_status, j.attempts AS email_attempts, j.run_at AS email_next_attempt_at,
          j.last_error_code AS email_error_code, j.last_error AS email_error
@@ -63,12 +73,25 @@ async function findValid(registrationId) {
   return rows[0] ?? null;
 }
 
+const countDownloads = (certificateIds) =>
+  query("UPDATE certificates SET download_count = download_count + 1, last_downloaded_at = NOW() WHERE id = ANY($1::int[])", [certificateIds]);
+
 export async function renderPdf(cert) {
   if (!cert.photo_path) logger.warn({ registrationId: cert.registration_id }, "Certificate rendered without a photo (none on record)");
   return renderInPool(cert);
 }
 
+// format: "pdf" | "jpg" (2400×1712 JPEG)
+export const render = (cert, format = "pdf") => (format === "jpg" ? renderInPool(cert, { format: "image" }) : renderPdf(cert));
+
 // ---------------------------------------------------------------- public
+
+// Why a registration has no certificate to download, in the API's error vocabulary
+function unavailable(status) {
+  return ["pending", "info_requested"].includes(status)
+    ? conflict("This registration has not been verified yet. The certificate is generated once an admin approves it.", "NOT_VERIFIED")
+    : conflict("This certificate is not available. The registration was not approved.", "NOT_AVAILABLE");
+}
 
 export async function getForDownload(registrationInput, phone) {
   const id = parseRegistrationNo(registrationInput);
@@ -76,21 +99,105 @@ export async function getForDownload(registrationInput, phone) {
   const { rows } = await query("SELECT id, status FROM registrations WHERE id = $1 AND phone = $2 AND deleted_at IS NULL", [id, phone]);
   if (!rows[0]) throw notFound("No registration found for this registration number and mobile number");
   const cert = await findValid(id);
-  if (rows[0].status !== "verified" || !cert || cert.revoked_at) {
-    throw conflict("Your registration has not been verified yet. The certificate will be available after verification.", "NOT_VERIFIED");
-  }
-  await query("UPDATE certificates SET download_count = download_count + 1, last_downloaded_at = NOW() WHERE id = $1", [cert.id]);
+  if (!isValid(cert)) throw unavailable(rows[0].status);
+  await countDownloads([cert.id]);
   return cert;
 }
 
+// What a participant sees about one registration: its status, the reason when it was sent back or refused, and its
+// certificate once approved
+function publicView(r) {
+  const available = Boolean(r.certificate_no) && isValid(r);
+  return {
+    registration_no: formatRegistrationNo(r.id),
+    name: r.name,
+    district: r.district,
+    status: r.status,
+    submitted_at: r.created_at,
+    thumb_path: r.thumb_path,
+    note: ["info_requested", "rejected", "duplicate"].includes(r.status) ? r.review_note : null,
+    certificate_available: available,
+    certificate_no: available ? r.certificate_no : null,
+    durgveer_no: available ? r.durgveer_no : null,
+    token: certificateToken(r.id),
+  };
+}
+
+const PUBLIC_SELECT = `
+  SELECT r.id, r.name, r.status, r.review_note, r.created_at, d.name_mr AS district, p.thumb_path,
+         c.certificate_no, c.durgveer_no, c.revoked_at
+  FROM registrations r
+  LEFT JOIN districts d ON d.id = r.district_id
+  LEFT JOIN registration_photos p ON p.registration_id = r.id AND p.is_current AND p.position = 1
+  LEFT JOIN certificates c ON c.registration_id = r.id`;
+
+// A participant link (/c/<token>): the registration's status, and its certificate once approved; 404 for a forged link
+export async function linkSummary(token) {
+  const id = parseCertificateToken(token);
+  const { rows } = id ? await query(`${PUBLIC_SELECT} WHERE r.id = $1 AND r.deleted_at IS NULL`, [id]) : { rows: [] };
+  if (!rows[0]) throw notFound("This certificate link is not valid");
+  return publicView(rows[0]);
+}
+
+export async function downloadByToken(token) {
+  const id = parseCertificateToken(token);
+  const cert = id && (await findValid(id));
+  if (!isValid(cert)) {
+    const { rows } = id ? await query("SELECT status FROM registrations WHERE id = $1 AND deleted_at IS NULL", [id]) : { rows: [] };
+    if (!rows[0]) throw notFound("This certificate link is not valid");
+    throw unavailable(rows[0].status);
+  }
+  await countDownloads([cert.id]);
+  return cert;
+}
+
+// One lookup page = at most this many registrations; also the most a "download all" PDF may hold
+export const LOOKUP_PAGE_SIZE = 20;
+
+// "Download all": the valid certificates among these links (one lookup page), a page each in registration order
+export async function bundleByTokens(tokens) {
+  const ids = [...new Set(tokens.map(parseCertificateToken).filter(Boolean))];
+  const { rows } = ids.length
+    ? await query(`${CERT_SELECT} WHERE c.registration_id = ANY($1::int[]) AND r.deleted_at IS NULL ORDER BY c.registration_id`, [ids])
+    : { rows: [] };
+  const certs = rows.filter(isValid);
+  if (!certs.length) throw notFound("No downloadable certificate among these links");
+  await countDownloads(certs.map((c) => c.id));
+  return { certs, pdf: await renderBundleInPool(certs) };
+}
+
+/**
+ * Every registration made with this mobile number — any number of them — newest first, a page at a time.
+ * Keyset pagination on (phone, id) (index registrations_phone_live_idx): each page is an index range read however
+ * many registrations the number has. before: the last id of the previous page. total only on the first page.
+ */
+export async function lookupByPhone(phone, { before = null } = {}) {
+  const params = [phone, LOOKUP_PAGE_SIZE + 1];
+  if (before) params.push(before);
+  const [{ rows }, count] = await Promise.all([
+    query(`${PUBLIC_SELECT} WHERE r.phone = $1 AND r.deleted_at IS NULL ${before ? "AND r.id < $3" : ""} ORDER BY r.id DESC LIMIT $2`, params),
+    before ? null : query("SELECT COUNT(*)::int AS n FROM registrations WHERE phone = $1 AND deleted_at IS NULL", [phone]),
+  ]);
+  const page = rows.slice(0, LOOKUP_PAGE_SIZE);
+  return {
+    data: page.map(publicView),
+    meta: {
+      next_before: rows.length > LOOKUP_PAGE_SIZE ? page[page.length - 1].id : null,
+      ...(count && { total: count.rows[0].n }),
+      page_size: LOOKUP_PAGE_SIZE,
+    },
+  };
+}
+
 export async function verifyPublic(certificateNo) {
-  const { rows } = await query(`${CERT_SELECT} WHERE UPPER(c.certificate_no) = UPPER($1)`, [certificateNo.trim()]);
+  // Numbers are stored upper-case: compare the column as is, so the UNIQUE index answers (no scan of every certificate)
+  const { rows } = await query(`${CERT_SELECT} WHERE c.certificate_no = $1`, [certificateNo.trim().toUpperCase()]);
   const c = rows[0];
   if (!c) throw notFound("No certificate exists with this number");
   return {
     certificate_no: c.certificate_no,
     durgveer_no: c.durgveer_no,
-    valid: !c.revoked_at && c.status === "verified",
+    valid: isValid(c) && !c.registration_deleted_at,
     name: c.name,
     district: c.district,
     registration_no: formatRegistrationNo(c.registration_id),
@@ -100,8 +207,6 @@ export async function verifyPublic(certificateNo) {
 }
 
 // ---------------------------------------------------------------- admin
-
-const MARATHI_DIGITS = "०१२३४५६७८९";
 
 // Admin list orders by column: certificate_no and durgveer_no are unique, issued_at and r.name are indexed
 export const ADMIN_SORTS = {
@@ -124,11 +229,24 @@ export async function adminList(f) {
     where.push(`j.status = $${params.length}`);
   }
   if (f.q) {
-    params.push(`%${f.q}%`);
-    // A plain number (Latin or Marathi digits) also finds the दुर्गवीर number
-    const digits = f.q.replace(/[०-९]/g, (d) => String(MARATHI_DIGITS.indexOf(d)));
-    const durgveer = /^\d{1,9}$/.test(digits) ? ` OR c.durgveer_no = ${Number(digits)}` : "";
-    where.push(`(r.name ILIKE $${params.length} OR c.certificate_no ILIKE $${params.length} OR r.phone LIKE $${params.length}${durgveer})`);
+    // The matching registrations come from index-backed lookups, joined once: an OR across two tables (name on
+    // registrations, number on certificates) could use no index and would read every certificate.
+    //   number (Latin or Marathi digits): the दुर्गवीर number (unique), or part of the mobile number (trigram)
+    //   text: part of the certificate number or of the name (trigram); contains-search needs 3 characters
+    const q = latinDigits(f.q);
+    const lookups = [];
+    if (/^\d+$/.test(q)) {
+      if (q.length <= 9) lookups.push(`SELECT registration_id FROM certificates WHERE durgveer_no = ${Number(q)}`);
+      if (q.length >= 3) {
+        params.push(likeContains(q));
+        lookups.push(`SELECT id FROM registrations WHERE phone LIKE $${params.length} AND deleted_at IS NULL`);
+      }
+    } else if (q.length >= 3) {
+      params.push(likeContains(q));
+      lookups.push(`SELECT registration_id FROM certificates WHERE certificate_no ILIKE $${params.length}`);
+      lookups.push(`SELECT id FROM registrations WHERE name ILIKE $${params.length} AND deleted_at IS NULL`);
+    }
+    where.push(lookups.length ? `c.registration_id IN (${lookups.join(" UNION ")})` : "FALSE");
   }
   const { limit, offset } = paginate(f);
   const sqlWhere = `WHERE ${where.join(" AND ")}`;
@@ -169,12 +287,38 @@ export async function reinstate(registrationId, adminId) {
     const { rowCount } = await client.query(
       `UPDATE certificates c SET revoked_at = NULL, revoked_by = NULL, revoke_reason = NULL
        FROM registrations r
-       WHERE c.registration_id = $1 AND r.id = c.registration_id AND r.status = 'verified' AND c.revoked_at IS NOT NULL`,
-      [registrationId],
+       WHERE c.registration_id = $1 AND r.id = c.registration_id AND r.status = ANY($2::text[]) AND c.revoked_at IS NOT NULL`,
+      [registrationId, CERTIFIED_STATUSES],
     );
     if (!rowCount) throw conflict("Only revoked certificates of verified registrations can be reinstated");
     await emailQueue.queueEmails(client, [registrationId], { reason: "verify", adminId });
   });
+}
+
+/**
+ * Admin "Regenerate certificate" (SRS v2.1 §6), for an approved registration: issues its certificate if it has none,
+ * makes a revoked one valid again, and renders it afresh with the current name and photo — e.g. after correcting a typo
+ * in the name. The render runs here, so a missing photo is reported to the admin now.
+ */
+export async function regenerate(registrationId, adminId) {
+  await withTransaction(async (client) => {
+    const { rows } = await client.query("SELECT status FROM registrations WHERE id = $1 AND deleted_at IS NULL FOR UPDATE", [registrationId]);
+    if (!rows[0]) throw notFound("Registration not found");
+    if (!CERTIFIED_STATUSES.includes(rows[0].status)) {
+      throw conflict("Certificates are generated only for approved registrations. Approve the registration first.", "NOT_CERTIFIABLE");
+    }
+    await issueBatch(client, [registrationId], adminId);
+    await client.query("UPDATE certificates SET regenerated_at = NOW(), regenerated_by = $2 WHERE registration_id = $1", [registrationId, adminId]);
+    await emailQueue.queueEmails(client, [registrationId], { reason: "verify", adminId }); // only if never emailed
+  });
+  const cert = await adminGet(registrationId);
+  try {
+    await renderInPool(cert, { requirePhoto: true });
+  } catch (err) {
+    if (err instanceof CertificateDataError) throw conflict(`The certificate could not be generated: ${err.message}`, err.code);
+    throw err;
+  }
+  return cert;
 }
 
 // ---------------------------------------------------------------- email delivery (admin)
@@ -183,7 +327,7 @@ export async function reinstate(registrationId, adminId) {
 export async function resend(registrationId, adminId) {
   const cert = await adminGet(registrationId);
   if (cert.revoked_at) throw conflict("A revoked certificate cannot be emailed", "CERTIFICATE_REVOKED");
-  if (cert.status !== "verified") throw conflict("Only certificates of verified registrations can be emailed", "NOT_VERIFIED");
+  if (!CERTIFIED_STATUSES.includes(cert.status)) throw conflict("Only certificates of verified registrations can be emailed", "NOT_VERIFIED");
   if (!cert.email || emailQueue.UNDELIVERABLE_EMAIL.test(cert.email)) throw conflict("This participant has no email address", "NO_EMAIL");
   return emailQueue.queueResend(registrationId, adminId);
 }

@@ -1,16 +1,29 @@
 import crypto from "node:crypto";
 import { query } from "../../db/pool.js";
+import { logger } from "../../utils/logger.js";
 
 // Totals are cached briefly so a busy home page doesn't SUM the table on every request.
 const TTL_MS = 15_000;
 let cached = null;
 let cachedAt = 0;
 
-// Who-was-counted rows are only needed for today; prune older ones at most once an hour per process.
+// Who-was-counted rows are only needed for today; prune older ones at most once an hour per process, a batch at a
+// time, so no statement deletes (and holds locks on) a whole day of visitors.
 const PRUNE_EVERY_MS = 60 * 60 * 1000;
+const PRUNE_BATCH = 10_000;
 let prunedAt = 0;
 
 const TODAY = "(NOW() AT TIME ZONE 'Asia/Kolkata')::date";
+
+async function prune() {
+  let deleted;
+  do {
+    ({ rowCount: deleted } = await query(
+      `DELETE FROM site_visitor_days WHERE ctid = ANY(ARRAY(
+         SELECT ctid FROM site_visitor_days WHERE day < ${TODAY} - 1 LIMIT ${PRUNE_BATCH}))`,
+    ));
+  } while (deleted >= PRUNE_BATCH);
+}
 
 async function fetchTotals() {
   const { rows } = await query(`
@@ -51,7 +64,8 @@ export async function recordVisit(visitor) {
 
   if (Date.now() - prunedAt > PRUNE_EVERY_MS) {
     prunedAt = Date.now();
-    query(`DELETE FROM site_visitor_days WHERE day < ${TODAY} - 1`).catch(() => { prunedAt = 0; });
+    // Old rows only take space: a failed prune waits for the next hour instead of running again on the next visit
+    prune().catch((err) => logger.warn({ err }, "Visitor prune failed"));
   }
 
   // Count this visit in the reply even when the totals come from the cache

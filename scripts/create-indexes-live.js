@@ -5,15 +5,20 @@
  * live traffic is not interrupted. Use this on a database that already has
  * data and active connections.
  *
- * Safe to re-run: IF NOT EXISTS skips indexes that already exist.
- * Each statement runs outside any transaction (required for CONCURRENTLY).
+ * Safe to re-run: IF NOT EXISTS skips indexes that already exist, and an index left INVALID by an interrupted
+ * build is dropped and built again. Each statement runs outside any transaction (required for CONCURRENTLY), on one
+ * dedicated connection with no statement timeout (a build over millions of rows takes minutes; the API pool's 60 s limit
+ * would cancel it). deploy.sh runs it BEFORE migrate.js, so the migrations' plain CREATE INDEX IF NOT EXISTS (which
+ * block writes while they build) find every large index already there. A step whose table or column a pending
+ * migration has yet to create is skipped; that migration builds it (on a new, small table).
  *
  * Usage:
  *   node scripts/create-indexes-live.js
  */
 
+import pg from "pg";
 import { EDITION_YEAR } from "../src/config/edition.js";
-import { pool } from "../src/db/pool.js";
+import { dbConfig } from "../src/db/pool.js";
 
 const STEPS = [
   {
@@ -64,18 +69,6 @@ const STEPS = [
           WHERE deleted_at IS NULL AND status = 'verified'`,
   },
   {
-    label: "registrations_phone_active_idx (same-phone duplicate lookup)",
-    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS registrations_phone_active_idx
-          ON registrations (phone)
-          WHERE deleted_at IS NULL`,
-  },
-  {
-    label: "reg_photos_current_dup_idx (moderation count — current + duplicate join)",
-    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS reg_photos_current_dup_idx
-          ON registration_photos (registration_id, duplicate_of_photo_id)
-          WHERE is_current = TRUE`,
-  },
-  {
     label: "certificates_cert_no_trgm (GIN — certificate number search)",
     sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS certificates_cert_no_trgm
           ON certificates USING GIN (certificate_no gin_trgm_ops)`,
@@ -85,11 +78,6 @@ const STEPS = [
     sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS certificates_pending_email_idx
           ON certificates (registration_id)
           WHERE revoked_at IS NULL AND emailed_at IS NULL`,
-  },
-  {
-    label: "audit_logs_action_text_idx (audit log action filter)",
-    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_logs_action_text_idx
-          ON audit_logs (action text_pattern_ops)`,
   },
   // अमृत शिवदुर्ग भूषण पुरस्कार nominations — mirrors migrations/017_award_scale_indexes.sql
   ...[
@@ -167,6 +155,88 @@ const STEPS = [
     label: "audit_logs_entity_sort_idx (audit log — sort by record type)",
     sql: "CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_logs_entity_sort_idx ON audit_logs (entity, id)",
   },
+  // SRS v2.1 mobile lookup and SMS queue — mirrors migrations/033 and 035
+  {
+    label: "registrations_phone_live_idx (mobile lookup, same-mobile list)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS registrations_phone_live_idx
+          ON registrations (phone, id) WHERE deleted_at IS NULL`,
+  },
+  {
+    label: "sms_messages_due_idx (SMS queue — due messages)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS sms_messages_due_idx
+          ON sms_messages (run_at, id) WHERE status = 'queued'`,
+  },
+  {
+    label: "sms_messages_lease_idx (SMS queue — expired leases)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS sms_messages_lease_idx
+          ON sms_messages (locked_at) WHERE status = 'processing'`,
+  },
+  // Millions of registrations — mirrors migrations/036_scale_millions.sql (its DROP INDEX statements run in the migration)
+  {
+    label: "dhash_band_keys() (near-duplicate band keys)",
+    sql: `CREATE OR REPLACE FUNCTION dhash_band_keys(hash bpchar) RETURNS integer[]
+          LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$
+          SELECT CASE WHEN hash ~* '^[0-9a-f]{16}$' THEN ARRAY[
+                       ('x' || substr(hash, 1, 4))::bit(16)::int,
+               65536 + ('x' || substr(hash, 5, 4))::bit(16)::int,
+              131072 + ('x' || substr(hash, 9, 4))::bit(16)::int,
+              196608 + ('x' || substr(hash, 13, 4))::bit(16)::int]
+          END $$`,
+  },
+  {
+    label: "registration_photos_dhash_keys_gin (near-duplicate photo probes)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS registration_photos_dhash_keys_gin
+          ON registration_photos USING GIN (dhash_band_keys(dhash))`,
+  },
+  {
+    label: "registration_photos_registration_idx (all photos of a registration)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS registration_photos_registration_idx
+          ON registration_photos (registration_id, photo_no)`,
+  },
+  {
+    label: "registration_photos_dup_main_idx (moderation — possible duplicates)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS registration_photos_dup_main_idx
+          ON registration_photos (registration_id)
+          WHERE is_current AND position = 1 AND duplicate_of_photo_id IS NOT NULL`,
+  },
+  {
+    label: "registration_photos_storage_key_pattern_uq (S3 numbering by folder)",
+    sql: `CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS registration_photos_storage_key_pattern_uq
+          ON registration_photos (storage_key text_pattern_ops) INCLUDE (photo_no) WHERE storage_key IS NOT NULL`,
+  },
+  {
+    label: "registrations_phone_trgm (GIN — mobile number search)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS registrations_phone_trgm
+          ON registrations USING GIN (phone gin_trgm_ops) WHERE deleted_at IS NULL`,
+  },
+  {
+    label: "registrations_whatsapp_trgm (GIN — WhatsApp number search)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS registrations_whatsapp_trgm
+          ON registrations USING GIN (whatsapp_number gin_trgm_ops) WHERE deleted_at IS NULL`,
+  },
+  {
+    label: "registrations_div_status_created_idx (division-scoped queues)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS registrations_div_status_created_idx
+          ON registrations (division_id, status, created_at, id) WHERE deleted_at IS NULL`,
+  },
+  {
+    label: "registrations_trash_idx (deleted registrations)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS registrations_trash_idx
+          ON registrations (created_at, id) WHERE deleted_at IS NOT NULL`,
+  },
+  {
+    label: "certificates_revoked_issued_idx (certificates — revoked filter)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS certificates_revoked_issued_idx
+          ON certificates (issued_at DESC, id DESC) WHERE revoked_at IS NOT NULL`,
+  },
+  {
+    label: "certificate_email_log_job_idx (email log → job)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS certificate_email_log_job_idx ON certificate_email_log (job_id)`,
+  },
+  {
+    label: "audit_logs_admin_idx (audit log — by admin)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_logs_admin_idx ON audit_logs (admin_id, id)`,
+  },
 ];
 
 const ANALYZE = [
@@ -186,8 +256,13 @@ async function run() {
   console.log(`\n=== Durgotsav ${EDITION_YEAR} — Live Index Creation ===\n`);
   console.log("Connecting to database...");
 
-  // Verify connection
-  const { rows } = await pool.query("SELECT current_database() AS db, version() AS ver");
+  // One dedicated connection: no statement timeout (builds take minutes on millions of rows) and no lock timeout
+  // (CONCURRENTLY waits for transactions already running on the table, then builds without blocking anyone).
+  const client = new pg.Client({ ...dbConfig(), application_name: "durgotsav-create-indexes" });
+  await client.connect();
+  await client.query("SET statement_timeout = 0");
+  await client.query("SET lock_timeout = 0");
+  const { rows } = await client.query("SELECT current_database() AS db, version() AS ver");
   console.log(`Connected: ${rows[0].db}\n`);
 
   let ok = 0;
@@ -198,9 +273,15 @@ async function run() {
     process.stdout.write(`  ${pad(step.label, 62)}`);
     const t = Date.now();
     try {
-      // CONCURRENTLY must run outside a transaction block.
-      // pool.query() uses a fresh connection that has no open transaction.
-      await pool.query(step.sql);
+      // A cancelled or failed CONCURRENTLY build leaves an INVALID index that IF NOT EXISTS would skip forever
+      const name = step.sql.match(/IF NOT EXISTS (\w+)/)?.[1];
+      if (name) {
+        const invalid = await client.query(
+          "SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = $1 AND NOT i.indisvalid", [name]);
+        if (invalid.rowCount) await client.query(`DROP INDEX CONCURRENTLY IF EXISTS ${name}`);
+      }
+      // CONCURRENTLY must run outside a transaction block; this connection never opens one.
+      await client.query(step.sql);
       const ms = Date.now() - t;
       console.log(`${tick}  ${ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`}`);
       ok++;
@@ -208,6 +289,10 @@ async function run() {
       // "already exists" should be caught by IF NOT EXISTS, but guard anyway
       if (err.code === "42P07") {
         console.log("(already exists — skipped)");
+        skipped++;
+      } else if (err.code === "42P01" || err.code === "42703" || err.code === "42883") {
+        // undefined table / column / function: a pending migration creates it, together with this index
+        console.log("(not in this database yet — the migration builds it)");
         skipped++;
       } else {
         console.log(`${cross}  FAILED: ${err.message}`);
@@ -219,7 +304,7 @@ async function run() {
 
   console.log("\n  Running ANALYZE on affected tables...");
   for (const sql of ANALYZE) {
-    await pool.query(sql).catch((err) => console.error(`  ANALYZE failed: ${err.message}`));
+    await client.query(sql).catch((err) => console.error(`  ANALYZE failed: ${err.message}`));
   }
 
   console.log(`\n=== Done: ${ok} created, ${skipped} skipped, ${failed} failed ===\n`);
@@ -229,7 +314,7 @@ async function run() {
     process.exitCode = 1;
   }
 
-  await pool.end();
+  await client.end();
 }
 
 run().catch((err) => {

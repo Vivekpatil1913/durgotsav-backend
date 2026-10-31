@@ -52,7 +52,7 @@ describe("review queue navigation (server side)", () => {
   test("first, middle and last record: prev / next / position in the oldest-first queue", async () => {
     const first = await neighbors(ids[0], queue);
     assert.equal(first.status, 200, JSON.stringify(first.body));
-    assert.deepEqual(first.body.data, { id: ids[0], prev_id: null, next_id: ids[1], position: 1, total: 6 });
+    assert.deepEqual(first.body.data, { id: ids[0], prev_id: null, next_id: ids[1], position: 1, total: 6, capped: false });
 
     const tie = (await neighbors(ids[3], queue)).body.data;
     assert.deepEqual([tie.prev_id, tie.next_id, tie.position], [ids[2], ids[4], 4], "same timestamp: ordered by id");
@@ -69,7 +69,7 @@ describe("review queue navigation (server side)", () => {
     const review = await request(app).post(`/api/admin/registrations/${ids[3]}/review`).set(auth()).send({ action: "verify" });
     assert.equal(review.status, 200);
     const n = (await neighbors(ids[3], queue)).body.data;
-    assert.deepEqual(n, { id: ids[3], prev_id: ids[2], next_id: ids[4], position: null, total: 5 });
+    assert.deepEqual(n, { id: ids[3], prev_id: ids[2], next_id: ids[4], position: null, total: 5, capped: false });
     // and from its neighbour's point of view it is gone
     assert.equal((await neighbors(ids[2], queue)).body.data.next_id, ids[4]);
   });

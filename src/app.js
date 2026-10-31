@@ -40,9 +40,11 @@ export function createApp() {
   // Public, EXIF-free processed images. File names are random and never reused, so cache hard.
   app.use("/uploads", express.static(paths.uploads, { maxAge: "30d", immutable: true, fallthrough: false, index: false }));
 
-  app.use("/api", apiLimiter);
+  // Admin requests carry a signed-in token (login has its own limiter): a moderation team behind one office address
+  // must not share the public per-address budget, so they are routed before it
   app.use("/api/auth", authRouter);
   app.use("/api/admin", adminRoutes);
+  app.use("/api", apiLimiter);
   app.use("/api/shivdurg-award", publicAwardRouter);
   app.use("/api", publicRoutes);
   app.use(seoRoutes);

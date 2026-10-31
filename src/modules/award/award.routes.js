@@ -1,3 +1,4 @@
+import { pipeline } from "node:stream/promises";
 import { Router } from "express";
 import multer from "multer";
 import { z } from "zod";
@@ -170,8 +171,13 @@ adminAwardRouter.get("/nominations/:id/documents/:docId", canRead,
     });
     if (doc.size_bytes) res.set("Content-Length", String(doc.size_bytes));
     audit(req, req.query.download === "1" ? "download" : "preview", "award_document", doc.id, { nomination: doc.reference_no });
-    stream.on("error", (err) => res.destroy(err));
-    stream.pipe(res);
+    // pipeline() closes the file or S3 stream as soon as the admin closes the preview, and cuts the response if a read
+    // fails midway. A closed preview is routine; anything else is worth a look.
+    try {
+      await pipeline(stream, res);
+    } catch (err) {
+      if (err.code !== "ERR_STREAM_PREMATURE_CLOSE") logger.warn({ err, document: doc.id }, "Evidence download failed");
+    }
   }));
 
 adminAwardRouter.post("/nominations/:id/status", canReview, validate({ params: idParams, body: statusSchema }),
@@ -244,5 +250,12 @@ export const awardWinners = createCrud({
   }),
 });
 
-adminAwardRouter.use("/committee", awardCommittee.router);
-adminAwardRouter.use("/winners", awardWinners.router);
+// The website's award section is cached for a short while (award.publicInfo): a saved member or winner clears it, so the
+// change shows at once on this instance and within the cache time on the others
+const refreshPublicInfo = (req, res, next) => {
+  if (req.method !== "GET") res.once("finish", award.clearInfoCache);
+  next();
+};
+
+adminAwardRouter.use("/committee", refreshPublicInfo, awardCommittee.router);
+adminAwardRouter.use("/winners", refreshPublicInfo, awardWinners.router);

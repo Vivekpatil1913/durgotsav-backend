@@ -26,8 +26,25 @@ export function errorHandler(err, req, res, next) {
   if (err?.code === "23503") {
     return res.status(400).json({ error: { code: "INVALID_REFERENCE", message: "Referenced record does not exist" } });
   }
+  // A number or id outside its column's range (a hand-edited URL), or text where a number belongs
+  if (err?.code === "22003" || err?.code === "22P02") {
+    return res.status(400).json({ error: { code: "BAD_REQUEST", message: "Invalid value in the request" } });
+  }
+  // Overload, not a bug: every pooled connection busy for 5 s, a statement cut off by statement_timeout, a deadlock or
+  // serialization victim, or the server out of connections. A 503 with Retry-After tells browsers and the load balancer
+  // to come back shortly.
+  if (err?.message === "timeout exceeded when trying to connect" || ["57014", "40P01", "40001", "53300"].includes(err?.code)) {
+    logger.warn({ path: req.path, method: req.method, code: err.code ?? "POOL_TIMEOUT" }, "Database busy");
+    res.set("Retry-After", "5");
+    return res.status(503).json({ error: { code: "BUSY", message: "The server is busy. Please try again in a few seconds" } });
+  }
   if (err instanceof AppError) {
     return res.status(err.status).json({ error: { code: err.code, message: err.message, details: err.details } });
+  }
+  // Client errors raised by Express middleware, e.g. a missing /uploads file (serve-static) or an aborted body
+  const status = err?.status ?? err?.statusCode;
+  if (Number.isInteger(status) && status >= 400 && status < 500) {
+    return res.status(status).json({ error: { code: status === 404 ? "NOT_FOUND" : "BAD_REQUEST", message: status === 404 ? "Not found" : "Invalid request" } });
   }
   logger.error({ err, path: req.path, method: req.method }, "Unhandled error");
   res.status(500).json({

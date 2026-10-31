@@ -1,7 +1,8 @@
 import { env } from "../../config/env.js";
-import { pool, query, withTransaction } from "../../db/pool.js";
+import { pool, query, reportQuery, withTransaction } from "../../db/pool.js";
+import { createCache } from "../../utils/cache.js";
 import { AppError, badRequest, conflict, notFound } from "../../utils/errors.js";
-import { paginate, pageMeta } from "../../utils/pagination.js";
+import { assertBrowsable, cappedCount, cappedMeta, paginate } from "../../utils/pagination.js";
 import { STATUSES, TRANSITIONS, publicOptions } from "./award.constants.js";
 import { acceptedExtensions, storeDocument, undoStored } from "./award.storage.js";
 
@@ -34,7 +35,14 @@ export function nominationWindow(edition, now = new Date()) {
   return { ...base, open: true, reason: "open" };
 }
 
-export async function publicInfo() {
+// The award section is on the website's home page, so its edition, committee and winners are served from memory for a
+// short while (one query set for all concurrent visitors); the open/closed status is still worked out per request.
+// Saving the configuration, a committee member or a winner clears it here; other instances catch up within INFO_TTL.
+const INFO_TTL = 30_000;
+const infoCache = createCache({ ttlMs: INFO_TTL, name: "award-info" });
+export const clearInfoCache = () => infoCache.clear();
+
+async function loadPublicInfo() {
   const { rows } = await query(`SELECT ${EDITION_PUBLIC} FROM award_editions WHERE is_current LIMIT 1`);
   const edition = rows[0];
   if (!edition) throw notFound("No award edition is configured");
@@ -44,11 +52,16 @@ export async function publicInfo() {
     query(`SELECT id, year, category, name, name_en, description, description_en, photo FROM award_winners
            WHERE is_active AND deleted_at IS NULL ORDER BY year DESC NULLS LAST, sort_order, id`),
   ]);
+  return { edition, committee: committee.rows, winners: winners.rows };
+}
+
+export async function publicInfo() {
+  const { edition, committee, winners } = await infoCache.get("current", loadPublicInfo);
   return {
     edition,
     status: nominationWindow(edition),
-    committee: committee.rows,
-    winners: winners.rows,
+    committee,
+    winners,
     options: publicOptions(),
     uploads: { extensions: acceptedExtensions(edition), max_mb: edition.max_upload_mb, max_files: edition.max_documents },
   };
@@ -56,15 +69,16 @@ export async function publicInfo() {
 
 // ---------------------------------------------------------------- submission
 
+// All of a nomination's entries of one kind (activities, evidence, …) in one statement, in the order given. The values
+// travel as one JSON array and take their types from the table's own row type.
 const insertRows = async (client, table, nominationId, cols, rows) => {
-  for (const [i, row] of rows.entries()) {
-    const values = cols.map((c) => row[c] ?? null);
-    await client.query(
-      `INSERT INTO ${table} (nomination_id, sort_order, ${cols.join(", ")})
-       VALUES ($1, $2, ${cols.map((_, j) => `$${j + 3}`).join(", ")})`,
-      [nominationId, i, ...values],
-    );
-  }
+  if (!rows.length) return;
+  const records = rows.map((row, i) => ({ ...Object.fromEntries(cols.map((c) => [c, row[c] ?? null])), sort_order: i }));
+  await client.query(
+    `INSERT INTO ${table} (nomination_id, sort_order, ${cols.join(", ")})
+     SELECT $1, r.sort_order, ${cols.map((c) => `r.${c}`).join(", ")} FROM jsonb_populate_recordset(NULL::${table}, $2::jsonb) r`,
+    [nominationId, JSON.stringify(records)],
+  );
 };
 
 const referenceNo = (prefix, category, id) => `${prefix}-${category === "organization" ? "O" : "I"}-${String(id).padStart(6, "0")}`;
@@ -83,7 +97,9 @@ const receipt = (row) => ({
 });
 
 /**
- * Saves a complete nomination in one transaction. `files` is the Map from inspectUploads().
+ * Saves a complete nomination. `files` is the Map from inspectUploads(). The evidence files are stored first, with no
+ * database connection held (up to 30 S3 uploads can take a while), under the reference number taken from the
+ * sequence up front; then one short transaction writes every row. On any failure the stored files are removed again.
  * A retried request with the same submission_id returns the stored receipt instead of a second record.
  */
 export async function submitNomination(v, files, edition, meta) {
@@ -114,29 +130,40 @@ export async function submitNomination(v, files, edition, meta) {
     throw badRequest(`जास्तीत जास्त ${edition.max_documents} पुरावे जोडता येतात`, { documents: "Too many entries" });
   }
 
+  // The id, and so the reference number that names the evidence folder, comes first
+  const { rows: [{ id }] } = await query("SELECT nextval(pg_get_serial_sequence('award_nominations', 'id')) AS id");
+  const reference = referenceNo(edition.reference_prefix, v.category, id);
   const written = [];
   try {
-    const saved = await withTransaction(async (client) => {
+    const documents = [];
+    for (const d of v.documents) {
+      const file = d.file_field ? files.get(d.file_field) : null;
+      const stored = file ? await storeDocument(file, { year: edition.year, reference }, written) : null;
+      documents.push({
+        ...d, storage: stored?.storage, storage_key: stored?.storage_key,
+        original_name: file?.originalName, mime_type: file?.mime, size_bytes: file?.size, sha256: file?.sha256,
+      });
+    }
+
+    return await withTransaction(async (client) => {
       const nominator = await client.query(
         "INSERT INTO award_nominators (full_name, mobile) VALUES ($1, $2) RETURNING id", [v.nominator_name, v.nominator_mobile]);
       const workOther = v.work_categories.includes("other") ? v.work_category_other : null;
       const ins = await client.query(
         `INSERT INTO award_nominations (
-           edition_id, nominator_id, category, submission_id, nominee_name, mobile, email, address, district_id, taluka_id,
-           work_started_year, work_categories, work_category_other,
+           id, reference_no, edition_id, nominator_id, category, submission_id, nominee_name, mobile, email, address,
+           district_id, taluka_id, work_started_year, work_categories, work_category_other,
            declaration_place, declaration_date, declaration_name, declaration_accepted_at, ip_address, user_agent)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW(),$17,$18)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NOW(),$19,$20)
          ON CONFLICT (submission_id) DO NOTHING
-         RETURNING id, submitted_at`,
-        [edition.id, nominator.rows[0].id, v.category, v.submission_id, v.nominee_name, v.mobile, v.email, v.address,
-          v.district_id, v.taluka_id, v.work_started_year, v.work_categories, workOther,
+         RETURNING submitted_at`,
+        [id, reference, edition.id, nominator.rows[0].id, v.category, v.submission_id, v.nominee_name, v.mobile, v.email,
+          v.address, v.district_id, v.taluka_id, v.work_started_year, v.work_categories, workOther,
           v.declaration_place, v.declaration_date, v.declaration_name, meta.ip ?? null, meta.userAgent?.slice(0, 400) ?? null],
       );
       // A concurrent duplicate request won the race: roll this one back and return its receipt
       if (!ins.rows[0]) throw Object.assign(new Error("replay"), { replay: true });
-      const { id, submitted_at } = ins.rows[0];
-      const reference = referenceNo(edition.reference_prefix, v.category, id);
-      await client.query("UPDATE award_nominations SET reference_no = $2 WHERE id = $1", [id, reference]);
+      const { submitted_at } = ins.rows[0];
       await client.query(
         "INSERT INTO award_nomination_status_history (nomination_id, from_status, to_status, remarks, ip_address) VALUES ($1, NULL, 'submitted', $2, $3)",
         [id, "Submitted online", meta.ip ?? null],
@@ -168,22 +195,10 @@ export async function submitNomination(v, files, edition, meta) {
       await insertRows(client, "award_nomination_activities", id, ["title", "fort_name", "work_type", "period", "details", "beneficiaries"], v.activities);
       await insertRows(client, "award_nomination_publications", id, ["title", "pub_type", "publisher", "year", "details"], v.publications);
       await insertRows(client, "award_nomination_honours", id, ["title", "awarded_by", "year", "details"], v.honours);
-
-      for (const [i, d] of v.documents.entries()) {
-        const file = d.file_field ? files.get(d.file_field) : null;
-        const stored = file ? await storeDocument(file, { year: edition.year, reference }, written) : null;
-        await client.query(
-          `INSERT INTO award_nomination_documents
-             (nomination_id, sort_order, title, doc_type, description, external_url, storage, storage_key, original_name, mime_type, size_bytes, sha256)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-          [id, i, d.title ?? null, d.doc_type ?? null, d.description ?? null, d.external_url ?? null,
-            stored?.storage ?? null, stored?.storage_key ?? null, file?.originalName ?? null, file?.mime ?? null, file?.size ?? null, file?.sha256 ?? null],
-        );
-      }
+      await insertRows(client, "award_nomination_documents", id, ["title", "doc_type", "description", "external_url", "storage",
+        "storage_key", "original_name", "mime_type", "size_bytes", "sha256"], documents);
       return { replayed: false, reference_no: reference, category: v.category, nominee_name: v.nominee_name, submitted_at };
     });
-    clearStatsCache();
-    return saved;
   } catch (err) {
     await undoStored(written);
     if (err.replay) {
@@ -211,12 +226,15 @@ export async function publicLookup(reference, mobile) {
 
 // ---------------------------------------------------------------- admin: list / stats / detail
 
-// Each sort matches an index from migration 017; tie-breaks run in the same direction so the index scans backwards too
+// Every sort but district reads its page straight off an index from migration 017 (after edition_id), in either
+// direction: the tie-breaks follow the index's own column directions, all reversed for the other direction, so the
+// index is simply scanned backwards. Status Z–A therefore lists the oldest first within a status. District sorts on a
+// joined column that no index covers, so it sorts all matches.
 const SORTS = {
   submitted_at: (d) => `n.submitted_at ${d}, n.id ${d}`,
   nominee_name: (d) => `n.nominee_name ${d}, n.id ${d}`,
   reference_no: (d) => `n.id ${d}`,
-  status: (d) => `n.status ${d}, n.submitted_at DESC, n.id DESC`,
+  status: (d) => (d === "DESC" ? "n.status DESC, n.submitted_at ASC, n.id ASC" : "n.status ASC, n.submitted_at DESC, n.id DESC"),
   district: (d) => `d.name_mr ${d}, n.id ${d}`,
 };
 const orderBy = (f) => SORTS[f.sort](f.dir === "asc" ? "ASC" : "DESC");
@@ -263,38 +281,28 @@ const LIST_COLUMNS = `n.id, n.reference_no, n.category, n.nominee_name, n.mobile
   n.work_categories, n.work_started_year, n.district_id, n.taluka_id, d.name_mr AS district, t.name_mr AS taluka,
   nm.full_name AS nominator_name, nm.mobile AS nominator_mobile`;
 
-// An exact COUNT(*) over millions of rows on every page view is the slowest part of a list, so counting stops here.
-// Pages past it can't be browsed: admins narrow the filters or export instead, as in any large search UI.
-export const COUNT_CAP = 10_000;
-
-// Counts matches up to `cap` and reports whether there are more
-async function cappedCount(sql, params, cap) {
-  const { rows } = await query(`SELECT COUNT(*)::int AS total FROM (SELECT 1 FROM award_nominations n ${sql} LIMIT ${cap + 1}) s`, params);
-  return { total: Math.min(rows[0].total, cap), capped: rows[0].total > cap };
-}
-
+// Counting stops at COUNT_CAP and pages past it can't be browsed (utils/pagination.js): admins narrow the filters or export
 export async function adminList(f) {
+  assertBrowsable(f);
   const edition = await editionFor(f.edition_id);
   const filters = buildFilters(f, edition.id);
   const { sql, params } = filters;
   const { limit, offset } = paginate(f);
-  if (offset >= COUNT_CAP) {
-    throw badRequest(`Only the first ${COUNT_CAP.toLocaleString("en-IN")} matches can be browsed. Narrow the filters or search to see more.`);
-  }
   const page = (from) => query(`SELECT ${LIST_COLUMNS} ${from} ORDER BY ${orderBy(f)} LIMIT ${limit} OFFSET ${offset}`, params);
+  const countMatches = () => cappedCount(query, `FROM award_nominations n ${sql}`, params);
   let rows;
   let count;
   if (filters.search) {
     // Count first: a narrow search (under the cap) is collected via the trigram indexes and sorted (fenced); a broad one
     // has matches so dense that walking the sort index finds a page quickly, while collecting them all would not.
-    count = await cappedCount(sql, params, COUNT_CAP);
+    count = await countMatches();
     rows = await page(listFrom({ ...filters, search: !count.capped }));
   } else {
-    [rows, count] = await Promise.all([page(listFrom(filters)), cappedCount(sql, params, COUNT_CAP)]);
+    [rows, count] = await Promise.all([page(listFrom(filters)), countMatches()]);
   }
   return {
     data: rows.rows,
-    meta: { ...pageMeta(f, count.total), capped: count.capped },
+    meta: cappedMeta(f, count),
     edition: { id: edition.id, year: edition.year, title: edition.title },
   };
 }
@@ -309,8 +317,9 @@ export async function exportPrecheck(f, maxRows) {
   const edition = await editionFor(f.edition_id);
   if (maxRows) {
     const { sql, params } = buildFilters(f, edition.id);
-    const { capped } = await cappedCount(sql, params, maxRows);
-    if (capped) throw badRequest(`This export is limited to ${maxRows.toLocaleString("en-IN")} nominations. Narrow the filters or export CSV.`);
+    // Is there a match past the limit? Reads at most maxRows + 1 rows, never the whole edition
+    const { rowCount } = await query(`SELECT 1 FROM award_nominations n ${sql} OFFSET ${maxRows} LIMIT 1`, params);
+    if (rowCount) throw badRequest(`This export is limited to ${maxRows.toLocaleString("en-IN")} nominations. Narrow the filters or export CSV.`);
   }
   return edition;
 }
@@ -322,6 +331,8 @@ export async function exportPrecheck(f, maxRows) {
 export async function streamExportRows(f, edition, onBatch) {
   const filters = buildFilters(f, edition.id);
   const client = await pool.connect();
+  let committed = false;
+  let broken = false;
   let sent = 0;
   try {
     await client.query("BEGIN READ ONLY");
@@ -333,39 +344,41 @@ export async function streamExportRows(f, edition, onBatch) {
       if (rows.length < EXPORT_BATCH) break;
     }
     await client.query("COMMIT");
+    committed = true;
     return sent;
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw err;
   } finally {
-    client.release();
+    // Every way out before COMMIT (a failed query, the client gone or stalled) closes the cursor's transaction here, so
+    // the connection goes back to the pool clean; one that cannot even roll back is discarded instead
+    if (!committed) {
+      await client.query("ROLLBACK").catch(() => {
+        broken = true;
+      });
+    }
+    client.release(broken);
   }
 }
 
-// Dashboard aggregates scan the whole edition, so repeated dashboard loads share one result for a short while.
-// Writes in this process clear it; other app instances catch up within STATS_TTL.
+// Dashboard aggregates scan the whole edition, so dashboard loads share one result for STATS_TTL, computed once for
+// concurrent callers (utils/cache.js) on the report pool. New nominations and status changes show within that time.
 const STATS_TTL = 30_000;
-const statsCache = new Map();
-export const clearStatsCache = () => statsCache.clear();
+const statsCache = createCache({ ttlMs: STATS_TTL, name: "award-stats" });
 
 export async function stats(editionId) {
   const edition = await editionFor(editionId);
-  const hit = statsCache.get(edition.id);
-  if (hit && Date.now() - hit.at < STATS_TTL) return hit.value;
-  const value = await computeStats(edition);
-  statsCache.set(edition.id, { at: Date.now(), value });
-  return value;
+  const counts = await statsCache.get(edition.id, () => countNominations(edition.id));
+  // Only the counts are cached: the title and the open/closed window are current on every load
+  return { edition: { id: edition.id, year: edition.year, title: edition.title }, window: nominationWindow(edition), ...counts };
 }
 
-async function computeStats(edition) {
+async function countNominations(editionId) {
   const [byStatus, byDistrict, byWork, daily] = await Promise.all([
-    query(`SELECT category, status, COUNT(*)::int AS count FROM award_nominations WHERE edition_id = $1 GROUP BY category, status`, [edition.id]),
-    query(`SELECT d.name_mr AS name, COUNT(*)::int AS count FROM award_nominations n JOIN districts d ON d.id = n.district_id
-           WHERE n.edition_id = $1 GROUP BY d.name_mr ORDER BY count DESC, name LIMIT 10`, [edition.id]),
-    query(`SELECT category, w AS key, COUNT(*)::int AS count FROM award_nominations, unnest(work_categories) w
-           WHERE edition_id = $1 GROUP BY category, w ORDER BY count DESC`, [edition.id]),
-    query(`SELECT to_char(submitted_at AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') AS day, COUNT(*)::int AS count
-           FROM award_nominations WHERE edition_id = $1 GROUP BY day ORDER BY day`, [edition.id]),
+    reportQuery(`SELECT category, status, COUNT(*)::int AS count FROM award_nominations WHERE edition_id = $1 GROUP BY category, status`, [editionId]),
+    reportQuery(`SELECT d.name_mr AS name, COUNT(*)::int AS count FROM award_nominations n JOIN districts d ON d.id = n.district_id
+                 WHERE n.edition_id = $1 GROUP BY d.name_mr ORDER BY count DESC, name LIMIT 10`, [editionId]),
+    reportQuery(`SELECT category, w AS key, COUNT(*)::int AS count FROM award_nominations, unnest(work_categories) w
+                 WHERE edition_id = $1 GROUP BY category, w ORDER BY count DESC`, [editionId]),
+    reportQuery(`SELECT to_char(submitted_at AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') AS day, COUNT(*)::int AS count
+                 FROM award_nominations WHERE edition_id = $1 GROUP BY day ORDER BY day`, [editionId]),
   ]);
   const totals = { total: 0, individual: 0, organization: 0, ...Object.fromEntries(Object.keys(STATUSES).map((s) => [s, 0])) };
   for (const r of byStatus.rows) {
@@ -373,14 +386,7 @@ async function computeStats(edition) {
     totals[r.category] += r.count;
     totals[r.status] += r.count;
   }
-  return {
-    edition: { id: edition.id, year: edition.year, title: edition.title },
-    window: nominationWindow(edition),
-    totals,
-    by_district: byDistrict.rows,
-    by_work: byWork.rows,
-    daily: daily.rows,
-  };
+  return { totals, by_district: byDistrict.rows, by_work: byWork.rows, daily: daily.rows };
 }
 
 export async function adminDetail(id) {
@@ -452,7 +458,7 @@ export async function documentForDownload(nominationId, documentId) {
 
 export async function changeStatus(id, to, remarks, adminId, ip) {
   try {
-    const changed = await withTransaction(async (client) => {
+    return await withTransaction(async (client) => {
       const { rows } = await client.query("SELECT id, status, category FROM award_nominations WHERE id = $1 FOR UPDATE", [id]);
       const n = rows[0];
       if (!n) throw notFound("Nomination not found");
@@ -469,8 +475,6 @@ export async function changeStatus(id, to, remarks, adminId, ip) {
       );
       return { from: n.status, to, category: n.category };
     });
-    clearStatsCache();
-    return changed;
   } catch (err) {
     if (err?.code === "23505" && err?.constraint === "uq_award_nominations_winner") {
       throw conflict("A winner has already been selected in this category for this award year. Move that nomination back first.", "WINNER_EXISTS");
@@ -502,5 +506,6 @@ export async function updateConfig(input, adminId) {
     `UPDATE award_editions SET ${cols.map((c, i) => `${c} = $${i + 2}`).join(", ")}, updated_by = $${cols.length + 2} WHERE id = $1`,
     [edition.id, ...values, adminId],
   );
+  clearInfoCache();
   return adminConfig();
 }

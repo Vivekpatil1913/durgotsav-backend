@@ -17,6 +17,12 @@ for (const file of files) {
   const sql = fs.readFileSync(path.join(paths.migrations, file), "utf8");
   const client = await pool.connect();
   try {
+    // A migration may rewrite or index millions of rows: no 60 s statement limit (the API's pool default). But it must
+    // not wait long for a lock held by live traffic — every request would queue behind it — so give up after 10 s
+    // and let the operator retry at a quieter moment. (Large indexes are built beforehand, without locks, by
+    // scripts/create-indexes-live.js.)
+    await client.query("SET statement_timeout = 0");
+    await client.query("SET lock_timeout = '10s'");
     await client.query("BEGIN");
     await client.query(sql);
     await client.query("INSERT INTO schema_migrations (name) VALUES ($1)", [file]);

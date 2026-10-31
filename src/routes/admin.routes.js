@@ -1,26 +1,33 @@
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { Router } from "express";
 import { z } from "zod";
 import { EDITION_YEAR } from "../config/edition.js";
 import { env } from "../config/env.js";
 import { query } from "../db/pool.js";
+import { admission } from "../middleware/admission.js";
 import { authenticate } from "../middleware/auth.js";
 import { checkExplicitPermission, checkPermission, scopeToAdminDivisions } from "../middleware/permission.js";
 import { imageUpload } from "../middleware/upload.js";
 import { validate } from "../middleware/validate.js";
-import { audit } from "../services/audit.service.js";
+import { audit, auditMany } from "../services/audit.service.js";
 import { storeContentImage } from "../services/image.service.js";
 import { asyncHandler, badRequest } from "../utils/errors.js";
 import { formatRegistrationNo } from "../utils/format.js";
-import { paginate, pageMeta, paginationSchema, sortParams, sortSql } from "../utils/pagination.js";
+import { logger } from "../utils/logger.js";
+import { assertBrowsable, cappedCount, cappedMeta, paginate, paginationSchema, sortParams, sortSql } from "../utils/pagination.js";
 import { adminsRouter } from "../modules/auth/auth.module.js";
 import { rbacRouter } from "../modules/rbac/rbac.module.js";
 import { adminAwardRouter } from "../modules/award/award.routes.js";
 import * as registrations from "../modules/registrations/registrations.service.js";
+import { wakeRejectionEmails } from "../modules/registrations/rejection-emails.js";
 import {
   adminListSchema, bulkReviewSchema, featureSchema, reviewSchema, updateRegistrationSchema,
 } from "../modules/registrations/registrations.schemas.js";
 import * as certificates from "../modules/certificates/certificates.service.js";
 import { wakeCertificateWorker } from "../modules/certificates/certificate.worker.js";
+import { queueCertificateSms } from "../modules/sms/sms.queue.js";
+import { wakeSmsWorker } from "../modules/sms/sms.worker.js";
 import * as galleryService from "../modules/gallery/gallery.service.js";
 import * as stats from "../modules/stats/stats.service.js";
 import { getAllSettings, registrationWindow, updateSettings } from "../modules/settings/settings.service.js";
@@ -90,11 +97,20 @@ reg.get("/", validate({ query: adminListSchema }),
   asyncHandler(async (req, res) =>
     res.json(await registrations.adminList(req.query, req.allowedDivisionIds))));
 
+// An export reads every matching registration; a few at a time per process keeps them from crowding out moderation
+const exportAdmission = admission({
+  concurrency: 2, queue: 0, retryAfterSeconds: 60, message: "Another export is being prepared. Please try again in a minute",
+});
+
 reg.get("/export.csv",
   checkPermission("reports", "write"),
+  exportAdmission,
   validate({ query: adminListSchema }),
   asyncHandler(async (req, res) => {
-    const cols = ["registration_no", "name", "participant_type", "organization_name", "members_count", "phone", "whatsapp_number", "email", "country", "district", "city", "fort", "status", "review_note", "certificate_no", "created_at"];
+    // The complete record (SRS v2.1 §6); columns the current form no longer asks for stay for earlier registrations
+    const cols = ["registration_no", "name", "participant_type", "organization_name", "members_count", "phone", "whatsapp_number", "email",
+      "country", "division", "district", "taluka", "city", "fort", "replica_notes", "status", "review_note",
+      "certificate_no", "durgveer_no", "certificate_revoked_at", "source", "created_at"];
     const cell = (v) => {
       let s = v instanceof Date ? v.toISOString() : String(v ?? "");
       if (/^[=+\-@]/.test(s)) s = `'${s}`;
@@ -103,18 +119,25 @@ reg.get("/export.csv",
     res.set({
       "Content-Type": "text/csv; charset=utf-8",
       "Content-Disposition": `attachment; filename="durgotsav-${EDITION_YEAR}-registrations.csv"`,
-      "Transfer-Encoding": "chunked",
+      "Cache-Control": "no-store",
     });
-    res.write("﻿" + cols.join(",") + "\n");
     let rowCount = 0;
-    for await (const batch of registrations.adminExportStream(req.query, req.allowedDivisionIds)) {
-      for (const r of batch) {
-        res.write(cols.map((c) => cell(r[c])).join(",") + "\n");
-        rowCount++;
+    async function* csv() {
+      yield "﻿" + cols.join(",") + "\n";
+      for await (const batch of registrations.adminExportStream(req.query, req.allowedDivisionIds)) {
+        rowCount += batch.length;
+        yield batch.map((r) => cols.map((c) => cell(r[c])).join(",")).join("\n") + "\n";
       }
     }
-    audit(req, "export", "registration", null, { rows: rowCount });
-    res.end();
+    // pipeline() reads the next batch only when the download has taken the last one (memory stays flat however many
+    // rows), and stops reading the database as soon as the admin cancels the download
+    try {
+      await pipeline(Readable.from(csv()), res);
+      audit(req, "export", "registration", null, { rows: rowCount });
+    } catch (err) {
+      if (err.code !== "ERR_STREAM_PREMATURE_CLOSE") logger.warn({ err, rows: rowCount }, "Registration export stopped");
+      res.destroy();
+    }
   }));
 
 reg.post("/bulk-review",
@@ -127,9 +150,12 @@ reg.post("/bulk-review",
     }
     const changed = await registrations.review(
       req.body.ids, req.body.action, req.body.note, req.admin.id, req.allowedDivisionIds);
-    changed.forEach((id) => audit(req, req.body.action, "registration", id, { bulk: true, note: req.body.note }));
-    if (req.body.action === "verify") wakeCertificateWorker(); // emails were queued in the review transaction
-    if (req.body.action === "reject") registrations.emailRejections(changed); // background; logs its own failures
+    auditMany(req, req.body.action, "registration", changed, { bulk: true, note: req.body.note });
+    if (req.body.action === "verify") {
+      wakeCertificateWorker(); // the certificate email and SMS were queued in the review transaction
+      wakeSmsWorker();
+    }
+    if (req.body.action === "reject") wakeRejectionEmails(); // the notices were queued in the review transaction
     res.json({ data: { updated: changed } });
   }));
 
@@ -137,7 +163,7 @@ reg.post("/photos/feature",
   checkPermission("moderation", "write"),
   validate({ body: featureSchema }),
   asyncHandler(async (req, res) => {
-    const updated = await registrations.setFeatured(req.body.photo_ids, req.body.featured);
+    const updated = await registrations.setFeatured(req.body.photo_ids, req.body.featured, req.allowedDivisionIds);
     audit(req, req.body.featured ? "feature" : "unfeature", "photo", null, { photo_ids: updated });
     res.json({ data: { updated, skipped: req.body.photo_ids.length - updated.length } });
   }));
@@ -180,9 +206,36 @@ reg.post("/:id/review",
       [req.params.id], req.body.action, req.body.note, req.admin.id, req.allowedDivisionIds);
     if (!changed.length) throw badRequest("Registration not found or deleted");
     audit(req, req.body.action, "registration", req.params.id, { note: req.body.note });
-    if (req.body.action === "verify") wakeCertificateWorker(); // emails were queued in the review transaction
-    if (req.body.action === "reject") registrations.emailRejections(changed); // background; logs its own failures
+    if (req.body.action === "verify") {
+      wakeCertificateWorker(); // the certificate email and SMS were queued in the review transaction
+      wakeSmsWorker();
+    }
+    if (req.body.action === "reject") wakeRejectionEmails(); // the notices were queued in the review transaction
     res.json({ data: await registrations.adminDetail(req.params.id, req.allowedDivisionIds) });
+  }));
+
+// SRS v2.1 §6: re-render an approved registration's certificate (e.g. after correcting the name); issues it if missing
+reg.post("/:id/certificate/regenerate",
+  checkPermission("certificates", "write"),
+  validate({ params: idParams }),
+  asyncHandler(async (req, res) => {
+    await registrations.assertRegistrationScope(req.params.id, req.allowedDivisionIds);
+    const cert = await certificates.regenerate(req.params.id, req.admin.id);
+    audit(req, "regenerate_certificate", "registration", req.params.id, { certificate_no: cert.certificate_no });
+    wakeCertificateWorker();
+    res.json({ data: await registrations.adminDetail(req.params.id, req.allowedDivisionIds) });
+  }));
+
+// SRS v2.1 §6: send the certificate link to the registered mobile again, by hand (queued; the SMS worker sends it)
+reg.post("/:id/sms",
+  checkPermission("registrations", "write"),
+  validate({ params: idParams }),
+  asyncHandler(async (req, res) => {
+    await registrations.assertRegistrationScope(req.params.id, req.allowedDivisionIds);
+    const sms = await queueCertificateSms(req.params.id, req.admin.id);
+    audit(req, "send_sms", "registration", req.params.id, { sms_id: sms.id });
+    wakeSmsWorker();
+    res.json({ data: sms });
   }));
 
 reg.delete("/:id",
@@ -426,6 +479,8 @@ router.get("/audit-logs", checkPermission("audit_logs", "read"), validate({
     where.push(`l.${key} = $${params.length}`);
   }
   const sqlWhere = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  // The log grows with every admin action: counting stops at COUNT_CAP and older pages are reached through the filters
+  assertBrowsable(req.query, "entries");
   const { limit, offset } = paginate(req.query);
   const [list, count] = await Promise.all([
     query(
@@ -433,12 +488,12 @@ router.get("/audit-logs", checkPermission("audit_logs", "read"), validate({
        LEFT JOIN admins a ON a.id = l.admin_id ${sqlWhere} ORDER BY ${sortSql(AUDIT_SORTS, req.query, "created_at")} LIMIT ${limit} OFFSET ${offset}`,
       params,
     ),
-    query(`SELECT COUNT(*)::int AS total FROM audit_logs l ${sqlWhere}`, params),
+    cappedCount(query, `FROM audit_logs l ${sqlWhere}`, params),
   ]);
   res.json({
     data: list.rows.map((r) =>
       r.entity === "registration" && r.entity_id ? { ...r, entity_label: formatRegistrationNo(r.entity_id) } : r),
-    meta: pageMeta(req.query, count.rows[0].total),
+    meta: cappedMeta(req.query, count),
   });
 }));
 

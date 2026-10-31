@@ -3,14 +3,14 @@ import os from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
 import { EDITION_YEAR, EDITION_YEAR_MR } from "../../config/edition.js";
 import { env } from "../../config/env.js";
-import { query } from "../../db/pool.js";
 import { emailLayout, escapeHtml, sendMail } from "../../services/mail.service.js";
-import { sendSms } from "../../services/sms.service.js";
 import { formatRegistrationNo, toMarathiDigits } from "../../utils/format.js";
 import { logger } from "../../utils/logger.js";
+import { certificateLink } from "./certificate.links.js";
 import { claimDue, finishJob, loadForDelivery, reapExpiredLeases, UNDELIVERABLE_EMAIL } from "./certificate.queue.js";
 import { renderInPool } from "./certificate.render-pool.js";
 import { CertificateDataError } from "./certificate.renderer.js";
+import { CERTIFIED_STATUSES } from "./certificates.service.js";
 
 // Emails certificates from the certificate_email_jobs queue (migration 028). Runs inside the API
 // (CERTIFICATE_WORKER=embedded) or as `npm run certificates:worker`; any number of processes can run at once.
@@ -27,9 +27,8 @@ const PAUSE_MAX_MS = 10 * 60_000;
 
 // ---------------------------------------------------------------- the email
 
-export const downloadLink = (registrationId) =>
-  `${env.SITE_URL}/certificate?registration=${encodeURIComponent(formatRegistrationNo(registrationId))}`;
-
+// Sent once an admin has approved the registration; the SMS with the certificate link is queued by that same
+// approval (modules/sms), this email carries the PDF itself
 function certificateEmail(cert, to, pdf) {
   return {
     to,
@@ -38,24 +37,10 @@ function certificateEmail(cert, to, pdf) {
       `<p>नमस्कार ${escapeHtml(cert.name)},</p>
        <p>दुर्गोत्सव ${EDITION_YEAR_MR} मध्ये सहभाग नोंदविल्याबद्दल आपले हार्दिक अभिनंदन! आपली नोंदणी व छायाचित्राची पडताळणी पूर्ण झाली असून आपले डिजिटल <b>अभिनंदन पत्र</b> सोबत जोडले आहे.</p>
        <p>नोंदणी क्रमांक: <b>${formatRegistrationNo(cert.registration_id)}</b><br>दुर्गवीर क्रमांक: <b>${toMarathiDigits(cert.durgveer_no)}</b><br>अभिनंदन पत्र क्रमांक: <b>${escapeHtml(cert.certificate_no)}</b></p>
-       <p><a href="${downloadLink(cert.registration_id)}" style="display:inline-block;background:#c2641c;color:#fff;padding:10px 18px;border-radius:999px;text-decoration:none">अभिनंदन पत्र पुन्हा डाउनलोड करा</a></p>`,
+       <p><a href="${certificateLink(cert.registration_id)}" style="display:inline-block;background:#c2641c;color:#fff;padding:10px 18px;border-radius:999px;text-decoration:none">अभिनंदन पत्र पुन्हा डाउनलोड करा</a></p>`,
     ),
     attachments: [{ filename: `Durgotsav-${EDITION_YEAR}-${cert.certificate_no}.pdf`, content: pdf, contentType: "application/pdf" }],
   };
-}
-
-// PDF §2.8: the download link also goes to the registered mobile, once per certificate
-async function sendSmsOnce(cert) {
-  if (cert.sms_sent_at) return;
-  try {
-    const sent = await sendSms(
-      cert.phone,
-      `अमृत दुर्गोत्सव ${EDITION_YEAR_MR}: आपली नोंदणी ${formatRegistrationNo(cert.registration_id)} पडताळणी पूर्ण. अभिनंदन पत्र डाउनलोड करा: ${downloadLink(cert.registration_id)}`,
-    );
-    if (sent) await query("UPDATE certificates SET sms_sent_at = NOW() WHERE id = $1 AND sms_sent_at IS NULL", [cert.id]);
-  } catch (err) {
-    logger.error({ err, registrationId: cert.registration_id }, "Certificate SMS failed");
-  }
 }
 
 // ---------------------------------------------------------------- checks
@@ -70,7 +55,7 @@ function blocker(rows, job) {
   const c = rows[0];
   if (c.revoked_at) return { next: { status: "cancelled" }, outcome: "cancelled", code: "REVOKED" };
   if (c.deleted_at) return { next: { status: "cancelled" }, outcome: "cancelled", code: "REGISTRATION_DELETED" };
-  if (c.status !== "verified") return { next: { status: "cancelled" }, outcome: "cancelled", code: "NOT_VERIFIED" };
+  if (!CERTIFIED_STATUSES.includes(c.status)) return { next: { status: "cancelled" }, outcome: "cancelled", code: "NOT_VERIFIED" };
   // Emailed after this delivery was asked for (e.g. by another worker): sending again would be a duplicate
   if (c.emailed_at && c.emailed_at >= job.requested_at) return { next: { status: "sent" }, outcome: "skipped", code: "ALREADY_SENT" };
   return null;
@@ -132,7 +117,6 @@ async function attempt(job, send, log) {
   const cert = rows[0];
   Object.assign(log, { certificate_no: cert.certificate_no, durgveer_no: cert.durgveer_no, photo_id: cert.photo_id });
 
-  await sendSmsOnce(cert);
   const to = cert.email?.trim();
   if (!to || UNDELIVERABLE_EMAIL.test(to)) return { next: { status: "skipped" }, outcome: "skipped", code: "NO_EMAIL" };
   log.recipient = to;

@@ -29,3 +29,12 @@ export function slugify(text) {
 }
 
 export const maskPhone = (phone) => (phone ? `${phone.slice(0, 2)}******${phone.slice(-2)}` : null);
+
+// '%text%' for LIKE / ILIKE, with the user's own % and _ taken literally
+export const likeContains = (text) => `%${String(text).replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+
+// 'text%' (starts with) for LIKE, with % and _ in the text taken literally; indexable by a text_pattern_ops index
+export const likePrefix = (text) => `${String(text).replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+
+// Search text with Marathi digits turned into Latin ones (numbers are stored with Latin digits)
+export const latinDigits = (text) => String(text).trim().replace(/[०-९]/g, (d) => String(MARATHI_DIGITS.indexOf(d)));

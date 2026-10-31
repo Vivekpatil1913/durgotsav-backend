@@ -1,6 +1,7 @@
 import { EDITION_YEAR, fillYear } from "../../config/edition.js";
 import { env } from "../../config/env.js";
 import { query } from "../../db/pool.js";
+import { publicCaptcha } from "../../services/captcha.service.js";
 import { SETTINGS } from "./settings.definitions.js";
 
 // Small read-through cache; settings change rarely and are read on every registration.
@@ -27,11 +28,13 @@ export async function getSetting(key, fallback = null) {
 
 // {year} in admin text is filled in for the public site (the admin API keeps the placeholder). edition_year lets
 // the website and admin console check they are built for the same edition as the API.
+// captcha: which "I am not a robot" widget the website draws, with its public site key (null when off).
 export async function getPublicSettings() {
   const rows = await getAllSettings();
   const out = fillYear(Object.fromEntries(rows.filter((r) => r.is_public).map((r) => [r.key, r.value])));
   out.edition_year = EDITION_YEAR;
   out.registration_status = await registrationWindow();
+  out.captcha = publicCaptcha();
   return out;
 }
 

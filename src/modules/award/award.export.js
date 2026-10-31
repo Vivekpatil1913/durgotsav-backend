@@ -1,6 +1,7 @@
 // Nomination exports (CSV / Excel / PDF). CSV and Excel stream cursor batches from streamExportRows() straight to
 // the response; the PDF (capped at EXPORT_LIMITS.pdf rows) is laid out from the collected rows.
 import path from "node:path";
+import { promisify } from "node:util";
 import zlib from "node:zlib";
 import PDFDocument from "pdfkit";
 import { paths } from "../../config/paths.js";
@@ -45,20 +46,38 @@ const csvCell = (v) => {
 
 const csvLine = (cells) => `${cells.map(csvCell).join(",")}\r\n`;
 
+// A download that takes nothing for this long is cut off: the export's database cursor (a pooled connection and an open
+// transaction) must not wait on a stalled client, and the server ends an idle transaction at 120 s anyway
+const STALL_MS = 60_000;
+
 /**
- * Wraps a writable (the HTTP response) so each write waits for the socket to drain.
- * Throws once the client has gone away, which stops the database cursor feeding it.
+ * Wraps a writable (the HTTP response) so each write waits for the socket to drain. One write at a time: callers await
+ * each. Throws once the client has gone away or stopped reading for `stallMs`, which stops the database cursor feeding it.
  */
-export function responseSink(stream) {
-  const gone = () => Object.assign(new Error("Client closed the download"), { aborted: true });
+export function responseSink(stream, stallMs = STALL_MS) {
+  const gone = (message = "Client closed the download") => Object.assign(new Error(message), { aborted: true });
+  // The write waiting for 'drain'. One listener of each kind for the whole download, not one per write.
+  let waiter = null;
+  const settle = (err) => {
+    const w = waiter;
+    waiter = null;
+    if (!w) return;
+    clearTimeout(w.timer);
+    if (err) w.reject(err);
+    else w.resolve();
+  };
+  stream.on("drain", () => settle(stream.destroyed ? gone() : null));
+  stream.on("close", () => settle(gone()));
   return {
     write(chunk) {
       if (stream.destroyed || stream.writableEnded) return Promise.reject(gone());
       if (stream.write(chunk)) return Promise.resolve();
       return new Promise((resolve, reject) => {
-        const done = (err) => { stream.off("drain", done); stream.off("close", done); err || stream.destroyed ? reject(gone()) : resolve(); };
-        stream.on("drain", done);
-        stream.on("close", done);
+        const stalled = () => {
+          settle(gone("The download stopped reading"));
+          stream.destroy();
+        };
+        waiter = { resolve, reject, timer: setTimeout(stalled, stallMs) };
       });
     },
   };
@@ -87,6 +106,7 @@ const colName = (i) => {
 };
 
 const SYNC_FLUSH = { finishFlush: zlib.constants.Z_SYNC_FLUSH };
+const deflateRaw = promisify(zlib.deflateRaw);
 
 /**
  * Writes a ZIP archive straight to `sink`. Small files go in whole; one entry can be streamed: its chunks are
@@ -133,7 +153,8 @@ function zipWriter(sink) {
         async write(data) {
           entry.crc = zlib.crc32(data, entry.crc);
           entry.size += data.length;
-          const d = zlib.deflateRawSync(data, SYNC_FLUSH);
+          // A batch of rows is megabytes of XML: compress it on the thread pool, not the event loop
+          const d = await deflateRaw(data, SYNC_FLUSH);
           entry.csize += d.length;
           await emit(d);
         },
@@ -234,6 +255,10 @@ const PDF_COLS = [
   ["submitted_at", "सादर दिनांक", 86],
 ];
 
+// A row takes about a quarter of a millisecond to lay out, so thousands in one go would hold every other request for
+// over a second: the layout yields to the event loop after each PDF_YIELD_ROWS rows
+const PDF_YIELD_ROWS = 100;
+
 export function toPdf(rows, { title, filters }) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: "A4", layout: "landscape", margin: 28, info: { Title: title, Author: "AMRUT" } });
@@ -264,25 +289,30 @@ export function toPdf(rows, { title, filters }) {
     doc.moveDown(0.6);
     header();
 
-    for (const r of rows.map(displayRow)) {
-      doc.fontSize(8);
-      const heights = PDF_COLS.map(([k, , w]) => doc.heightOfString(String(r[k] ?? ""), { width: w - 6 }));
-      const h = Math.min(Math.max(...heights), 40) + 6;
-      if (doc.y + h > bottom) {
-        doc.addPage();
-        header();
+    const layout = async () => {
+      for (const [i, row] of rows.entries()) {
+        if (i > 0 && i % PDF_YIELD_ROWS === 0) await new Promise(setImmediate);
+        const r = displayRow(row);
+        doc.fontSize(8);
+        const heights = PDF_COLS.map(([k, , w]) => doc.heightOfString(String(r[k] ?? ""), { width: w - 6 }));
+        const h = Math.min(Math.max(...heights), 40) + 6;
+        if (doc.y + h > bottom) {
+          doc.addPage();
+          header();
+        }
+        let x = left;
+        const y = doc.y;
+        doc.fillColor("#24170D");
+        for (const [k, , w] of PDF_COLS) {
+          doc.text(String(r[k] ?? ""), x + 3, y + 2, { width: w - 6, height: h - 4, ellipsis: true });
+          x += w;
+        }
+        doc.moveTo(left, y + h).lineTo(x, y + h).lineWidth(0.4).strokeColor("#E6D2AF").stroke();
+        doc.y = y + h + 1;
       }
-      let x = left;
-      const y = doc.y;
-      doc.fillColor("#24170D");
-      for (const [k, , w] of PDF_COLS) {
-        doc.text(String(r[k] ?? ""), x + 3, y + 2, { width: w - 6, height: h - 4, ellipsis: true });
-        x += w;
-      }
-      doc.moveTo(left, y + h).lineTo(x, y + h).lineWidth(0.4).strokeColor("#E6D2AF").stroke();
-      doc.y = y + h + 1;
-    }
-    if (!rows.length) doc.fontSize(10).fillColor("#6E5843").text("No nominations match these filters.");
-    doc.end();
+      if (!rows.length) doc.fontSize(10).fillColor("#6E5843").text("No nominations match these filters.");
+      doc.end();
+    };
+    layout().catch(reject);
   });
 }

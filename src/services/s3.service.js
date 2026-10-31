@@ -7,7 +7,13 @@ import { env } from "../config/env.js";
 import { AppError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
-const client = new S3Client({ region: env.AWS_REGION || "ap-south-1" });
+// Without timeouts the SDK waits forever on a stalled connection, holding the request (and its photo in memory) open.
+// A request that does not finish in time fails and is retried by the SDK (maxAttempts), then reported as unavailable.
+const client = new S3Client({
+  region: env.AWS_REGION || "ap-south-1",
+  maxAttempts: 3,
+  requestHandler: { connectionTimeout: 5_000, socketTimeout: 30_000, requestTimeout: 60_000, throwOnRequestTimeout: true },
+});
 
 // Indirection so tests can stub the network calls without touching the real client
 export const s3Transport = {

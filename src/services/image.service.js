@@ -4,13 +4,18 @@ import path from "node:path";
 import sharp from "sharp";
 import { paths } from "../config/paths.js";
 import { badRequest } from "../utils/errors.js";
+import { logger } from "../utils/logger.js";
+
+// Largest photo decoded (width × height). The website sends at most ~8 megapixels; a bigger, or forged, image would make
+// every decode take seconds of CPU and hundreds of MB of memory.
+const MAX_PIXELS = 50_000_000;
 
 const FOLDERS = new Set(["registrations", "forts", "content", "videos", "testimonials", "awards"]);
 
 // 64-bit difference hash: robust to resizing / recompression, so a re-uploaded copy of the same photo
 // lands within a few bits of the original (PDF §3.4, §6.5 — the same photo may not be reused).
 async function dhash(buffer) {
-  const pixels = await sharp(buffer).rotate().grayscale().resize(9, 8, { fit: "fill" }).raw().toBuffer();
+  const pixels = await sharp(buffer, { limitInputPixels: MAX_PIXELS }).rotate().grayscale().resize(9, 8, { fit: "fill" }).raw().toBuffer();
   let bits = "";
   for (let y = 0; y < 8; y++) {
     for (let x = 0; x < 8; x++) bits += pixels[y * 9 + x] > pixels[y * 9 + x + 1] ? "1" : "0";
@@ -52,10 +57,13 @@ export async function prepareParticipantPhoto(file) {
   if ((meta.width || 0) < 300 || (meta.height || 0) < 300) {
     throw badRequest("Photo is too small. Please upload a clear photo (at least 300×300 px)", { photo: "Photo too small" });
   }
+  if (meta.width * meta.height > MAX_PIXELS) {
+    throw badRequest("Photo is too large. Please upload a photo of at most 50 megapixels", { photo: "Photo too large" });
+  }
   let display;
   let thumb;
   try {
-    const base = sharp(file.buffer, { failOn: "error" }).rotate(); // apply EXIF orientation, then metadata is dropped
+    const base = sharp(file.buffer, { failOn: "error", limitInputPixels: MAX_PIXELS }).rotate(); // apply EXIF orientation, then metadata is dropped
     display = await base.clone().resize(1600, 1600, { fit: "inside", withoutEnlargement: true }).webp({ quality: 82 })
       .toBuffer({ resolveWithObject: true });
     thumb = await base.clone().resize(480, 480, { fit: "inside", withoutEnlargement: true }).webp({ quality: 72 }).toBuffer();
@@ -147,9 +155,22 @@ export async function loadAsJpeg(publicPath, size = 240, height = size, position
   if (!publicPath?.startsWith("/uploads/")) return null;
   const file = path.join(paths.uploads, publicPath.slice("/uploads/".length));
   if (!file.startsWith(paths.uploads)) return null; // no path traversal
+  let bytes;
   try {
-    return await sharp(file).resize(size, height, { fit: "cover", position }).jpeg({ quality: 85 }).toBuffer();
-  } catch {
+    bytes = await fs.readFile(file);
+  } catch (err) {
+    // Missing (e.g. uploads/ not shared between servers): the certificate prints without the photo, and says so loudly.
+    // Any other read error is temporary (I/O pressure): fail, so the email is retried instead of sent without the photo.
+    if (err.code === "ENOENT") {
+      logger.error({ file: publicPath }, "Photo file missing from uploads/");
+      return null;
+    }
+    throw Object.assign(new Error("Photo could not be read"), { code: "PHOTO_UNREADABLE", cause: err });
+  }
+  try {
+    return await sharp(bytes).resize(size, height, { fit: "cover", position }).jpeg({ quality: 85 }).toBuffer();
+  } catch (err) {
+    logger.error({ err, file: publicPath }, "Photo file is not a readable image");
     return null;
   }
 }

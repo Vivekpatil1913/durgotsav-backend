@@ -40,13 +40,15 @@ git pull origin main 2>&1 | tee -a "$LOG_FILE"
 info "2/6  Installing dependencies (production only)..."
 npm ci --omit=dev 2>&1 | tee -a "$LOG_FILE"
 
-# ── 3. Run pending SQL migrations ─────────────────────────────────────────────
-info "3/6  Running database migrations..."
-node scripts/migrate.js 2>&1 | tee -a "$LOG_FILE"
-
-# ── 4. Create scale indexes (CONCURRENTLY — no table locks on live DB) ────────
-info "4/6  Creating scale indexes (CONCURRENTLY, no table lock)..."
+# ── 3. Create scale indexes (CONCURRENTLY — no table locks on live DB) ────────
+# Before the migrations: they create the same indexes with plain CREATE INDEX IF NOT EXISTS, which would block
+# registrations while it builds over millions of rows. Built here first, those statements have nothing left to do.
+info "3/6  Creating scale indexes (CONCURRENTLY, no table lock)..."
 node scripts/create-indexes-live.js 2>&1 | tee -a "$LOG_FILE"
+
+# ── 4. Run pending SQL migrations ─────────────────────────────────────────────
+info "4/6  Running database migrations..."
+node scripts/migrate.js 2>&1 | tee -a "$LOG_FILE"
 
 # ── 5. Restart the API server ─────────────────────────────────────────────────
 info "5/6  Restarting API server..."

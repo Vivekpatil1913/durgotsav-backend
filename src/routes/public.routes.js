@@ -1,18 +1,26 @@
 import { Router } from "express";
 import { z } from "zod";
 import { query } from "../db/pool.js";
-import { contactLimiter, lookupLimiter, registerLimiter, visitLimiter } from "../middleware/rateLimit.js";
+import { admission } from "../middleware/admission.js";
+import {
+  contactLimiter, downloadLimiter, lookupLimiter, lookupPageLimiter, registerLimiter, verifyLimiter, visitLimiter,
+} from "../middleware/rateLimit.js";
 import { imageUpload, imageUploadFields } from "../middleware/upload.js";
 import { validate } from "../middleware/validate.js";
+import { requireCaptcha } from "../services/captcha.service.js";
 import { emailLayout, escapeHtml, sendMail } from "../services/mail.service.js";
 import { env } from "../config/env.js";
 import { EDITION_YEAR } from "../config/edition.js";
-import { asyncHandler, notFound } from "../utils/errors.js";
+import { AppError, asyncHandler, notFound } from "../utils/errors.js";
 import { paginationSchema } from "../utils/pagination.js";
 import { logger } from "../utils/logger.js";
 import * as registrations from "../modules/registrations/registrations.service.js";
-import { lookupSchema, registerSchema, resubmitSchema } from "../modules/registrations/registrations.schemas.js";
+import {
+  bundleQuery, formatQuery, lookupSchema, mobileLookupPageSchema, mobileLookupSchema, registerSchema, resubmitSchema, tokenParams,
+} from "../modules/registrations/registrations.schemas.js";
 import * as certificates from "../modules/certificates/certificates.service.js";
+import { lookupToken, parseLookupToken } from "../modules/certificates/certificate.links.js";
+import { wakeSmsWorker } from "../modules/sms/sms.worker.js";
 import * as galleryService from "../modules/gallery/gallery.service.js";
 import * as stats from "../modules/stats/stats.service.js";
 import * as visits from "../modules/stats/visits.service.js";
@@ -121,36 +129,88 @@ router.get("/gallery", cache(30), validate({ query: pageQuery.extend({ limit: z.
 // GET /api/images?page=N — the photo album, ALBUM_PAGE_SIZE per page
 router.get("/images", cache(30), validate({ query: pageQuery }), asyncHandler(async (req, res) => res.json(await galleryService.album(req.query))));
 
-// ------------------------------------------------------------- registration (PDF §2, §3)
-router.post("/registrations", registerLimiter, imageUploadFields(["photo", "photo_2"]), validate({ body: registerSchema }),
+// ------------------------------------------------------------- registration (SRS v2.1 §2–§5)
+// registrationAdmission bounds how many uploads this process holds in memory at once (the rest wait, unread).
+// requireCaptcha runs after multer has read the form and before anything is validated, processed or stored.
+// The registration waits for an admin's approval; the acknowledgment SMS was queued in its transaction.
+const registrationAdmission = admission({
+  concurrency: env.REGISTRATION_CONCURRENCY,
+  queue: env.REGISTRATION_QUEUE,
+  message: "Many registrations are being uploaded right now. Please try again in a few seconds",
+});
+router.post("/registrations", registerLimiter, registrationAdmission, imageUploadFields(["photo", "photo_2"]), requireCaptcha, validate({ body: registerSchema }),
   asyncHandler(async (req, res) => {
     const files = [req.files?.photo?.[0], req.files?.photo_2?.[0]];
     const { replayed, ...result } = await registrations.register(req.body, files, { ip: req.ip, userAgent: req.get("user-agent") });
+    if (!replayed) wakeSmsWorker();
     res.status(replayed ? 200 : 201).json({ data: result });
   }));
 
 router.get("/registrations/status", lookupLimiter, validate({ query: lookupSchema }),
   asyncHandler(async (req, res) => res.json({ data: await registrations.publicStatus(req.query.registration, req.query.phone) })));
 
-router.post("/registrations/:registration/resubmit", lookupLimiter, imageUpload("photo"), validate({ body: resubmitSchema }),
+// A new photo is the same work as a registration's, so it waits its turn behind the same gate
+router.post("/registrations/:registration/resubmit", lookupLimiter, registrationAdmission, imageUpload("photo"), validate({ body: resubmitSchema }),
   asyncHandler(async (req, res) => res.json({ data: await registrations.resubmit(req.params.registration, req.body, req.file) })));
 
-// ------------------------------------------------------------- certificates (PDF §2.7, §2.8, §7)
-async function sendCertificate(res, registration, phone) {
-  const cert = await certificates.getForDownload(registration, phone);
-  const pdf = await certificates.renderPdf(cert);
+// ------------------------------------------------------------- certificates (SRS v2.1 §5, §7)
+const FILE_TYPES = { pdf: "application/pdf", jpg: "image/jpeg" };
+
+async function sendCertificateFile(res, cert, format) {
+  const data = await certificates.render(cert, format);
   res.set({
-    "Content-Type": "application/pdf",
-    "Content-Disposition": `attachment; filename="Durgotsav-${EDITION_YEAR}-${cert.certificate_no}.pdf"`,
+    "Content-Type": FILE_TYPES[format],
+    "Content-Disposition": `attachment; filename="Durgotsav-${EDITION_YEAR}-${cert.certificate_no}.${format}"`,
     "Cache-Control": "no-store",
   });
-  res.send(pdf);
+  res.send(data);
 }
 
 router.get("/certificates/download", lookupLimiter, validate({ query: lookupSchema }),
-  asyncHandler(async (req, res) => sendCertificate(res, req.query.registration, req.query.phone)));
+  asyncHandler(async (req, res) =>
+    sendCertificateFile(res, await certificates.getForDownload(req.query.registration, req.query.phone), req.query.format)));
 
-router.get("/certificates/verify/:certificateNo", lookupLimiter,
+// Every registration of one mobile number, newest first, a page at a time. The first page needs the CAPTCHA (so numbers
+// cannot be scanned by a script) and returns a lookup_token that fetches the following pages for 30 minutes.
+router.post("/certificates/lookup", lookupLimiter, requireCaptcha, validate({ body: mobileLookupSchema }),
+  asyncHandler(async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    const page = await certificates.lookupByPhone(req.body.phone);
+    res.json({ data: page.data, meta: { ...page.meta, lookup_token: lookupToken(req.body.phone) } });
+  }));
+
+router.get("/certificates/lookup", lookupPageLimiter, validate({ query: mobileLookupPageSchema }),
+  asyncHandler(async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    const phone = parseLookupToken(req.query.lookup_token);
+    if (!phone) throw new AppError(401, "This search has expired. Please search again", { code: "LOOKUP_EXPIRED" });
+    res.json(await certificates.lookupByPhone(phone, { before: req.query.before }));
+  }));
+
+// Participant links (/c/<token> on the website: SMS, email, the pop-up after registering, the lookup list):
+// the registration's status, and its certificate once approved
+router.get("/certificates/link/:token", downloadLimiter, validate({ params: tokenParams }),
+  asyncHandler(async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    res.json({ data: await certificates.linkSummary(req.params.token) });
+  }));
+
+router.get("/certificates/link/:token/download", downloadLimiter, validate({ params: tokenParams, query: formatQuery }),
+  asyncHandler(async (req, res) => sendCertificateFile(res, await certificates.downloadByToken(req.params.token), req.query.format)));
+
+// "Download all": one PDF, a page per certificate
+router.get("/certificates/bundle", downloadLimiter, validate({ query: bundleQuery }),
+  asyncHandler(async (req, res) => {
+    const { pdf } = await certificates.bundleByTokens(req.query.tokens);
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `attachment; filename="Durgotsav-${EDITION_YEAR}-Abhinandan-Patra.pdf"`,
+      "Cache-Control": "no-store",
+    });
+    res.send(pdf);
+  }));
+
+router.get("/certificates/verify/:certificateNo", verifyLimiter,
   validate({ params: z.object({ certificateNo: z.string().trim().min(5).max(40) }) }),
   asyncHandler(async (req, res) => res.json({ data: await certificates.verifyPublic(req.params.certificateNo) })));
 

@@ -100,6 +100,9 @@ describe("registration → verification → certificate", () => {
     assert.match(reg.registration_no, new RegExp(`^${NUMBER_PREFIX}-\\d{6}$`));
     assert.equal(reg.registration_no, `${NUMBER_PREFIX}-010000`, "registration numbers start at 10000 (migration 032)");
     assert.equal(reg.status, "pending");
+    // the participant's status link; the certificate comes only with an admin's approval
+    assert.match(reg.token, /^[0-9a-z]+\.[\w-]{16}$/);
+    assert.equal(reg.certificate, undefined);
 
     const detail = await request(app).get(`/api/admin/registrations/${reg.id}`).set(auth());
     const p = detail.body.data.photos[0];
@@ -125,6 +128,7 @@ describe("registration → verification → certificate", () => {
     assert.equal(ok.status, 200);
     assert.equal(ok.body.data.status, "pending");
     assert.equal(ok.body.data.certificate_available, false);
+    assert.equal(ok.body.data.token, reg.token);
   });
 
   test("unverified photos are not public and certificates are not available", async () => {
@@ -132,6 +136,7 @@ describe("registration → verification → certificate", () => {
     assert.equal(album.body.total_images, 0);
     const cert = await request(app).get("/api/certificates/download").query({ registration: reg.registration_no, phone: "9876543210" });
     assert.equal(cert.status, 409);
+    assert.equal(cert.body.error.code, "NOT_VERIFIED");
   });
 
   test("request_info requires a note, then the participant can resubmit", async () => {
@@ -143,11 +148,15 @@ describe("registration → verification → certificate", () => {
 
     const status = await request(app).get("/api/registrations/status").query({ registration: reg.registration_no, phone: "9876543210" });
     assert.equal(status.body.data.note, "प्रतिकृती स्पष्ट दिसत नाही");
+    assert.equal(status.body.data.certificate_available, false);
+    const held = await request(app).get(`/api/certificates/link/${reg.token}/download`);
+    assert.equal(held.status, 409);
 
     const re = await request(app).post(`/api/registrations/${reg.registration_no}/resubmit`)
       .field("phone", "9876543210").attach("photo", await makePhoto(), "new.jpg");
     assert.equal(re.status, 200, JSON.stringify(re.body));
     assert.equal(re.body.data.status, "pending");
+    assert.equal(re.body.data.certificate_available, false, "back in the review queue, still no certificate");
   });
 
   test("verify issues a certificate that downloads as a PDF", async () => {
@@ -232,6 +241,13 @@ describe("CMS", () => {
     const trash = await request(app).get("/api/admin/forts?trashed=true").set(auth());
     assert.ok(trash.body.data.some((f) => f.id === fort.id));
     assert.equal((await request(app).post(`/api/admin/forts/${fort.id}/restore`).set(auth())).status, 200);
+  });
+
+  test("CMS pages are served with their English version (migration 034)", async () => {
+    const res = await request(app).get("/api/pages/rules");
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.ok(res.body.data.title);
+    assert.ok("title_en" in res.body.data && "body_en" in res.body.data);
   });
 
   test("settings update accepts known keys only", async () => {

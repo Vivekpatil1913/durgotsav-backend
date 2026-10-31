@@ -3,13 +3,16 @@ import { env } from "../config/env.js";
 import { badRequest } from "../utils/errors.js";
 
 const ALLOWED = new Set(["image/jpeg", "image/png", "image/webp"]);
+// Text fields of a photo form are short (names, notes ≤ 500 characters): 16 KB each instead of busboy's 1 MB default,
+// so a request cannot park megabytes of text in memory next to its photo
+const FIELD_BYTES = 16 * 1024;
 
 // Files are kept in memory: sharp re-encodes them (which also proves they really are images)
 // before anything touches the disk. See services/image.service.js.
 export const imageUpload = (field, { maxMb = env.UPLOAD_MAX_MB } = {}) =>
   multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: maxMb * 1024 * 1024, files: 1, fields: 30 },
+    limits: { fileSize: maxMb * 1024 * 1024, files: 1, fields: 30, fieldSize: FIELD_BYTES },
     fileFilter: (req, file, cb) =>
       ALLOWED.has(file.mimetype)
         ? cb(null, true)
@@ -21,7 +24,7 @@ export const imageUpload = (field, { maxMb = env.UPLOAD_MAX_MB } = {}) =>
 export const imageUploadFields = (fields, { maxMb = env.UPLOAD_MAX_MB } = {}) =>
   multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: maxMb * 1024 * 1024, files: fields.length, fields: 30 },
+    limits: { fileSize: maxMb * 1024 * 1024, files: fields.length, fields: 30, fieldSize: FIELD_BYTES },
     fileFilter: (req, file, cb) =>
       ALLOWED.has(file.mimetype)
         ? cb(null, true)

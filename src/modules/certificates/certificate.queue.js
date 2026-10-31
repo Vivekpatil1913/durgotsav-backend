@@ -181,8 +181,8 @@ export async function reapExpiredLeases(leaseMinutes, maxAttempts, worker) {
 // Everything printed on the certificate or needed to deliver it, read fresh for every attempt
 export async function loadForDelivery(certificateId) {
   const { rows } = await query(
-    `SELECT c.id, c.registration_id, c.certificate_no, c.durgveer_no, c.revoked_at, c.emailed_at, c.sms_sent_at,
-            r.name, r.phone, r.email, r.status, r.deleted_at,
+    `SELECT c.id, c.registration_id, c.certificate_no, c.durgveer_no, c.revoked_at, c.emailed_at,
+            r.name, r.phone, r.email, r.status, r.deleted_at, r.created_at AS registered_at,
             p.id AS photo_id, p.registration_id AS photo_registration_id, p.image_path AS photo_path
      FROM certificates c
      JOIN registrations r ON r.id = c.registration_id
