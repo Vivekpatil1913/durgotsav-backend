@@ -3,7 +3,7 @@ import os from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
 import { EDITION_YEAR, EDITION_YEAR_MR } from "../../config/edition.js";
 import { env } from "../../config/env.js";
-import { emailLayout, escapeHtml, sendMail } from "../../services/mail.service.js";
+import { emailLayout, escapeHtml, mailErrorKind, sendMail } from "../../services/mail.service.js";
 import { formatRegistrationNo, toMarathiDigits } from "../../utils/format.js";
 import { logger } from "../../utils/logger.js";
 import { certificateLink } from "./certificate.links.js";
@@ -71,15 +71,7 @@ const printed = (c) => JSON.stringify([c.registration_id, c.certificate_no, c.du
 //   transient  anything else: retry later
 function classify(err) {
   if (err instanceof CertificateDataError) return { kind: "data", code: err.code };
-  const smtp = err.responseCode;
-  const code = smtp ? `SMTP_${smtp}` : err.code || "ERROR";
-  const text = `${err.response ?? ""} ${err.message ?? ""}`;
-  if (["EAUTH", "ECONNECTION", "ETIMEDOUT", "ESOCKET", "EDNS", "ETLS", "MAIL_DISABLED"].includes(err.code)
-    || smtp === 421 || smtp === 454 || /5\.4\.5|quota|limit exceeded|rate limit|too many/i.test(text)) {
-    return { kind: "transport", code };
-  }
-  if (err.code === "EENVELOPE" || (smtp >= 500 && smtp < 600)) return { kind: "recipient", code };
-  return { kind: "transient", code };
+  return { kind: mailErrorKind(err), code: err.responseCode ? `SMTP_${err.responseCode}` : err.code || "ERROR" };
 }
 
 // ±20 % jitter so a burst of failures does not retry in lock-step

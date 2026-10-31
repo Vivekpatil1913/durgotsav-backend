@@ -116,6 +116,10 @@ reg.get("/export.csv",
       if (/^[=+\-@]/.test(s)) s = `'${s}`;
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
+    // The first batch is read before anything is sent, so a failure there is an ordinary JSON error for the admin
+    const batches = registrations.adminExportStream(req.query, req.allowedDivisionIds);
+    const first = await batches.next();
+    const rowsOf = (batch) => batch.map((r) => cols.map((c) => cell(r[c])).join(",")).join("\n") + "\n";
     res.set({
       "Content-Type": "text/csv; charset=utf-8",
       "Content-Disposition": `attachment; filename="durgotsav-${EDITION_YEAR}-registrations.csv"`,
@@ -124,9 +128,12 @@ reg.get("/export.csv",
     let rowCount = 0;
     async function* csv() {
       yield "﻿" + cols.join(",") + "\n";
-      for await (const batch of registrations.adminExportStream(req.query, req.allowedDivisionIds)) {
+      if (first.done) return;
+      rowCount += first.value.length;
+      yield rowsOf(first.value);
+      for await (const batch of batches) {
         rowCount += batch.length;
-        yield batch.map((r) => cols.map((c) => cell(r[c])).join(",")).join("\n") + "\n";
+        yield rowsOf(batch);
       }
     }
     // pipeline() reads the next batch only when the download has taken the last one (memory stays flat however many

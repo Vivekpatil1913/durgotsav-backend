@@ -245,6 +245,25 @@ const STEPS = [
   },
 ];
 
+// Superseded by the indexes above (migration 036 lists what replaces each). Dropped CONCURRENTLY, and only once every
+// build above succeeded, so a running API never loses an index it still needs; migration 036's own DROP INDEX statements
+// then have nothing left to do and take no lock.
+const DROPS = [
+  "registration_photos_dhash_idx",
+  "registration_photos_reg_idx",
+  "reg_photos_current_dup_idx",
+  "registration_photos_storage_key_idx",
+  "idx_registrations_div_status",
+  "registrations_phone_idx",
+  "registrations_phone_active_idx",
+  "registrations_district_idx",
+  "registrations_fort_idx",
+  "registrations_status_idx",
+  "audit_logs_created_idx",
+  "audit_logs_action_text_idx",
+  "sms_messages_created_idx",
+];
+
 const ANALYZE = [
   "ANALYZE registrations",
   "ANALYZE registration_photos",
@@ -268,8 +287,15 @@ async function run() {
   await client.connect();
   await client.query("SET statement_timeout = 0");
   await client.query("SET lock_timeout = 0");
-  const { rows } = await client.query("SELECT current_database() AS db, version() AS ver");
+  const { rows } = await client.query("SELECT current_database() AS db, current_setting('server_version_num')::int AS version");
   console.log(`Connected: ${rows[0].db}\n`);
+  // PostgreSQL 14.0–14.3 could build an incomplete index CONCURRENTLY (fixed in 14.4)
+  if (rows[0].version >= 140000 && rows[0].version < 140004) {
+    console.error("PostgreSQL 14.0–14.3 can build incomplete indexes CONCURRENTLY. Upgrade to 14.4 or newer first.");
+    process.exitCode = 1;
+    await client.end();
+    return;
+  }
 
   let ok = 0;
   let skipped = 0;
@@ -306,6 +332,18 @@ async function run() {
         // Continue with remaining indexes; one failure is not fatal
       }
     }
+  }
+
+  if (failed === 0) {
+    console.log("\n  Dropping superseded indexes (CONCURRENTLY)...");
+    for (const name of DROPS) {
+      await client.query(`DROP INDEX CONCURRENTLY IF EXISTS ${name}`).catch((err) => {
+        failed++;
+        console.error(`  ${cross} ${name}: ${err.message}`);
+      });
+    }
+  } else {
+    console.log("\n  Superseded indexes kept: a build above failed (run the script again once it is fixed).");
   }
 
   console.log("\n  Running ANALYZE on affected tables...");

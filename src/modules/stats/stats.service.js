@@ -14,7 +14,7 @@ const PUBLIC_STATS_TTL_MS = 60_000;
 const TABLE_TTL_MS = 60_000;
 // The city table is the heaviest (a free-text GROUP BY over every registration with its photo and certificate)
 const CITY_TTL_MS = 5 * 60_000;
-const publicCache = createCache({ ttlMs: PUBLIC_STATS_TTL_MS, name: "public-stats" });
+const publicCache = createCache({ ttlMs: PUBLIC_STATS_TTL_MS, maxStaleMs: Infinity, name: "public-stats" }); // public: never waited for
 const dashboardCache = createCache({ ttlMs: DASHBOARD_TTL_MS, name: "dashboard" });
 const tableCache = createCache({ ttlMs: TABLE_TTL_MS, maxEntries: 300, name: "stats-tables" });
 const cityCache = createCache({ ttlMs: CITY_TTL_MS, maxEntries: 300, name: "stats-cities" });

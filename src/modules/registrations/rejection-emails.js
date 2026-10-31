@@ -4,7 +4,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { EDITION_YEAR_MR } from "../../config/edition.js";
 import { env } from "../../config/env.js";
 import { query } from "../../db/pool.js";
-import { emailLayout, escapeHtml, sendMail } from "../../services/mail.service.js";
+import { emailLayout, escapeHtml, mailErrorKind, sendMail } from "../../services/mail.service.js";
 import { formatRegistrationNo } from "../../utils/format.js";
 import { logger } from "../../utils/logger.js";
 import { registrationWindow } from "../settings/settings.service.js";
@@ -22,6 +22,9 @@ const LEASE_MINUTES = 5; // far longer than one send (SMTP times out after 60 s)
 const POLL_MS = 5_000;
 const REAP_EVERY_MS = 60_000;
 const BACKOFF_MINUTES = [1, 5, 15, 60, 180]; // after attempt 1, 2, 3 …; the last value repeats
+// After a mail-server failure (down, login refused, over quota) stop claiming for a while: 30 s, doubling up to 10 min
+const PAUSE_MIN_MS = 30_000;
+const PAUSE_MAX_MS = 10 * 60_000;
 
 /**
  * Queues the notice for each registration in `ids` that is rejected and has an email address. db: the client of the
@@ -29,6 +32,12 @@ const BACKOFF_MINUTES = [1, 5, 15, 60, 180]; // after attempt 1, 2, 3 …; the l
  */
 export async function enqueueRejectionEmails(db, ids, requestedBy = null) {
   if (!ids.length) return 0;
+  // A notice still waiting would send the same (latest) reason again: the new one replaces it
+  await db.query(
+    `UPDATE registration_emails SET status = 'cancelled', error = 'SUPERSEDED', updated_at = NOW()
+     WHERE registration_id = ANY($1::int[]) AND status = 'queued'`,
+    [ids],
+  );
   const { rowCount } = await db.query(
     `INSERT INTO registration_emails (registration_id, kind, requested_by)
      SELECT r.id, 'rejection', $2::int FROM registrations r
@@ -82,13 +91,14 @@ async function claimDue(limit, worker) {
 }
 
 // Records one attempt, only while this worker still holds the lease. Returns false when the lease was lost.
+// next.refund: the attempt does not count (the mail server was unavailable, not this message's fault).
 async function finish(job, worker, next) {
   const { rowCount } = await query(
     `UPDATE registration_emails
      SET status = $3, run_at = COALESCE($4, run_at), error = $5, sent_at = CASE WHEN $6 THEN NOW() ELSE sent_at END,
-         locked_at = NULL, locked_by = NULL, updated_at = NOW()
+         attempts = attempts - $7::int, locked_at = NULL, locked_by = NULL, updated_at = NOW()
      WHERE id = $1 AND locked_by = $2 AND status = 'processing'`,
-    [job.id, worker, next.status, next.runAt ?? null, next.error?.slice(0, 300) ?? null, next.status === "sent"],
+    [job.id, worker, next.status, next.runAt ?? null, next.error?.slice(0, 300) ?? null, next.status === "sent", next.refund ? 1 : 0],
   );
   return rowCount === 1;
 }
@@ -117,6 +127,14 @@ async function waitForSendSlot() {
 
 const retryAt = (attempt) => new Date(Date.now() + BACKOFF_MINUTES[Math.min(attempt, BACKOFF_MINUTES.length) - 1] * 60_000);
 
+let pausedUntil = 0;
+let pauseMs = PAUSE_MIN_MS;
+function pauseSending(code) {
+  pausedUntil = Date.now() + pauseMs;
+  logger.warn({ code, seconds: pauseMs / 1000 }, "Rejection email worker: mail server unavailable, pausing");
+  pauseMs = Math.min(pauseMs * 2, PAUSE_MAX_MS);
+}
+
 /**
  * Sends one claimed message and records the outcome. Returns its new status ('sent' | 'queued' (retry later) |
  * 'failed' | 'cancelled'). send: the mail function (tests pass a fake).
@@ -135,14 +153,21 @@ export async function processRejectionEmail(job, send = sendMail) {
       await waitForSendSlot();
       const info = await send(rejectionEmail(r, await registrationWindow()));
       // false: email is switched off (no SMTP settings) — keep the notice for when it is configured
-      next = info === false ? { status: "queued", runAt: retryAt(job.attempts), error: "MAIL_DISABLED" } : { status: "sent" };
+      next = info === false ? { status: "queued", runAt: retryAt(job.attempts), error: "MAIL_DISABLED", refund: true } : { status: "sent" };
+      if (info !== false) pauseMs = PAUSE_MIN_MS;
     }
   } catch (err) {
-    // A refused address will not start working on its own (SMTP 5xx); anything else is retried with back-off
-    const permanent = Number(err.responseCode) >= 500 && Number(err.responseCode) < 600;
-    next = permanent || job.attempts >= env.CERTIFICATE_EMAIL_MAX_ATTEMPTS
-      ? { status: "failed", error: err.message }
-      : { status: "queued", runAt: retryAt(job.attempts), error: err.message };
+    // A refused address will not start working on its own; a mail server that is down, refuses our login or is over
+    // its quota is waited for without using up the notice's attempts; anything else is retried with back-off
+    const kind = mailErrorKind(err);
+    if (kind === "transport") {
+      pauseSending(err.code ?? err.responseCode);
+      next = { status: "queued", runAt: new Date(pausedUntil), error: err.message, refund: true };
+    } else {
+      next = kind === "recipient" || job.attempts >= env.CERTIFICATE_EMAIL_MAX_ATTEMPTS
+        ? { status: "failed", error: err.message }
+        : { status: "queued", runAt: retryAt(job.attempts), error: err.message };
+    }
   }
   const fields = { emailId: job.id, registrationId: job.registration_id, attempt: job.attempts };
   if (next.status === "failed") logger.error({ ...fields, error: next.error }, "Rejection email failed");
@@ -192,7 +217,7 @@ async function loop() {
         const reaped = await reapExpired();
         if (reaped) logger.warn({ count: reaped }, "Rejection email worker: re-queued messages whose worker stopped mid-send");
       }
-      const free = CONCURRENCY - inFlight.size;
+      const free = Date.now() < pausedUntil ? 0 : CONCURRENCY - inFlight.size;
       if (free > 0) {
         const jobs = await claimDue(free, WORKER_ID);
         for (const job of jobs) {

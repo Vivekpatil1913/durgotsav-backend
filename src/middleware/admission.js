@@ -5,6 +5,9 @@ import { AppError } from "../utils/errors.js";
  * Retry-After. Put it BEFORE the body parser (multer): a parked request's upload is not read until it is admitted, so
  * a spike of photo uploads cannot fill the process's memory — at most `concurrency` photos are in memory at once.
  * A request that gives up while parked (client gone) leaves the queue.
+ * The slot is freed when the response has been sent, or when the client hangs up — unless the route's handler (wrapped
+ * in whileAdmitted) is still working on the photo: then it is freed when that work ends, so the gate bounds the work
+ * in progress, not only the open connections.
  */
 export function admission({ concurrency, queue, retryAfterSeconds = 10, message }) {
   let active = 0;
@@ -20,8 +23,11 @@ export function admission({ concurrency, queue, retryAfterSeconds = 10, message 
       const following = waiting.shift();
       if (following) following.start();
     };
+    req.admission = { working: false, release };
     res.on("finish", release);
-    res.on("close", release);
+    res.on("close", () => {
+      if (!req.admission.working) release();
+    });
     next();
   }
 
@@ -45,3 +51,14 @@ export function admission({ concurrency, queue, retryAfterSeconds = 10, message 
     waiting.push(entry);
   };
 }
+
+// Wraps the route handler behind admission(): its slot stays taken until the handler has finished, even when the
+// client hung up halfway (the photo is still in memory, sharp and S3 still at work).
+export const whileAdmitted = (handler) => async (req, res) => {
+  if (req.admission) req.admission.working = true;
+  try {
+    return await handler(req, res);
+  } finally {
+    req.admission?.release();
+  }
+};

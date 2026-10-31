@@ -33,8 +33,12 @@ cd "$APP_DIR"
 mkdir -p logs
 
 # ── 1. Pull latest code ───────────────────────────────────────────────────────
-info "1/6  Pulling latest code from git..."
-git pull origin main 2>&1 | tee -a "$LOG_FILE"
+if [ -z "${DEPLOY_REEXEC:-}" ]; then
+  info "1/6  Pulling latest code from git..."
+  git pull origin main 2>&1 | tee -a "$LOG_FILE"
+  # The pull may have replaced this very script: run the new version for the remaining steps
+  DEPLOY_REEXEC=1 exec bash "$0" "$@"
+fi
 
 # ── 2. Install / update Node dependencies ─────────────────────────────────────
 info "2/6  Installing dependencies (production only)..."

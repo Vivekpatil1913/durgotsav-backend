@@ -34,6 +34,23 @@ export async function sendMail({ to, subject, html, attachments }) {
   return t.sendMail({ from: env.MAIL_FROM || env.SMTP_USER, to, subject, html, attachments });
 }
 
+/**
+ * What a failed send means for its retry, for every mail queue:
+ *   "transport"  the mail server is down, refused our login or is over its quota: retry later, and pause sending
+ *   "recipient"  the address was refused: retrying the same address will not help
+ *   "transient"  anything else: retry with back-off
+ */
+export function mailErrorKind(err) {
+  const smtp = err.responseCode;
+  const text = `${err.response ?? ""} ${err.message ?? ""}`;
+  if (["EAUTH", "ECONNECTION", "ETIMEDOUT", "ESOCKET", "EDNS", "ETLS", "MAIL_DISABLED"].includes(err.code)
+    || smtp === 421 || smtp === 454 || /5.4.5|quota|limit exceeded|rate limit|too many/i.test(text)) {
+    return "transport";
+  }
+  if (err.code === "EENVELOPE" || (smtp >= 500 && smtp < 600)) return "recipient";
+  return "transient";
+}
+
 // Closes pooled SMTP connections (scripts call this so the process can exit)
 export function closeMail() {
   transporter?.close();

@@ -3,6 +3,16 @@ import { env } from "../config/env.js";
 import { AppError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
+// Overload or the database briefly away (restart, failover): pool full or slow to connect, connection lost, statement
+// cut off, deadlock or serialization victim, out of connections, server shutting down / starting up (57P0x), any
+// connection exception (SQLSTATE class 08), or the database port refusing connections
+const BUSY_MESSAGES = new Set([
+  "timeout exceeded when trying to connect", "Connection terminated due to connection timeout", "Connection terminated unexpectedly",
+]);
+const BUSY_CODES = ["57014", "40P01", "40001", "53300", "57P01", "57P02", "57P03"];
+const isBusy = (err) => BUSY_MESSAGES.has(err?.message) || BUSY_CODES.includes(err?.code) || /^08/.test(err?.code ?? "")
+  || (err?.code === "ECONNREFUSED" && err?.port === env.DB_PORT);
+
 export function notFoundHandler(req, res) {
   res.status(404).json({ error: { code: "NOT_FOUND", message: `Route ${req.method} ${req.path} not found` } });
 }
@@ -19,6 +29,12 @@ export function errorHandler(err, req, res, next) {
   if (err?.type === "entity.parse.failed") {
     return res.status(400).json({ error: { code: "BAD_JSON", message: "Malformed JSON body" } });
   }
+  // A multipart body cut off, garbled or abandoned on the way (busboy's and multer's plain errors): the client's request,
+  // not a server error — nothing to log
+  if (/^(Unexpected end of form|Malformed part header|Multipart: Boundary not found|Malformed urlencoded form|Request aborted|Request closed)/.test(err?.message ?? "")
+    || (err?.code === "ECONNRESET" && req.destroyed)) {
+    return res.status(400).json({ error: { code: "BAD_UPLOAD", message: "The upload was incomplete or malformed. Please try again" } });
+  }
   // Postgres constraint violations that slipped past validation
   if (err?.code === "23505") {
     return res.status(409).json({ error: { code: "DUPLICATE", message: "A record with these details already exists" } });
@@ -31,10 +47,8 @@ export function errorHandler(err, req, res, next) {
   if (err?.code === "22003" || err?.code === "22P02" || err?.code === "22001") {
     return res.status(400).json({ error: { code: "BAD_REQUEST", message: "Invalid value in the request" } });
   }
-  // Overload, not a bug: every pooled connection busy for 5 s, a statement cut off by statement_timeout, a deadlock or
-  // serialization victim, or the server out of connections. A 503 with Retry-After tells browsers and the load balancer
-  // to come back shortly.
-  if (err?.message === "timeout exceeded when trying to connect" || ["57014", "40P01", "40001", "53300"].includes(err?.code)) {
+  // Overload, not a bug (isBusy): a 503 with Retry-After tells browsers and the load balancer to come back shortly
+  if (isBusy(err)) {
     logger.warn({ path: req.path, method: req.method, code: err.code ?? "POOL_TIMEOUT" }, "Database busy");
     res.set("Retry-After", "5");
     return res.status(503).json({ error: { code: "BUSY", message: "The server is busy. Please try again in a few seconds" } });

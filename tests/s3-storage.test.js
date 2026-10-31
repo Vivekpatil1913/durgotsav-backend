@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import request from "supertest";
-import { DeleteObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, HeadObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import { ADMIN, makePhoto, resetDatabase } from "./helpers.js";
 import { istDateFolder, participantFolderName, photoObjectKey } from "../src/services/participant-photo-keys.js";
 
@@ -21,6 +21,7 @@ const auth = () => ({ Authorization: `Bearer ${token}` });
 const objects = new Map();
 const calls = [];
 let failNextPut = null;
+let loseNextPutReply = false; // S3 stores the object, the reply is lost, the SDK's retry gets 412
 const awsError = (name, status) => Object.assign(new Error(name), { name, $metadata: { httpStatusCode: status } });
 
 before(async () => {
@@ -29,6 +30,11 @@ before(async () => {
   s3Transport.send = async (cmd) => {
     calls.push(cmd);
     if (cmd instanceof PutObjectCommand) {
+      if (loseNextPutReply) {
+        loseNextPutReply = false;
+        objects.set(cmd.input.Key, cmd.input);
+        throw awsError("PreconditionFailed", 412);
+      }
       if (failNextPut) {
         const err = failNextPut;
         failNextPut = null;
@@ -37,6 +43,11 @@ before(async () => {
       if (cmd.input.IfNoneMatch === "*" && objects.has(cmd.input.Key)) throw awsError("PreconditionFailed", 412);
       objects.set(cmd.input.Key, cmd.input);
       return {};
+    }
+    if (cmd instanceof HeadObjectCommand) {
+      const object = objects.get(cmd.input.Key);
+      if (!object) throw awsError("NotFound", 404);
+      return { Metadata: object.Metadata };
     }
     if (cmd instanceof DeleteObjectCommand) {
       objects.delete(cmd.input.Key);
@@ -135,6 +146,17 @@ describe("registration with S3 originals", () => {
     assert.equal(objects.get(keyFor(3)).orphan, true);
     const { rows } = await pool.query("SELECT storage_key FROM registration_photos WHERE registration_id = $1", [res.body.data.id]);
     assert.equal(rows[0].storage_key, keyFor(4));
+  });
+
+  test("an upload stored by S3 whose reply was lost keeps that object (no second copy)", async () => {
+    const before = puts().length;
+    loseNextPutReply = true;
+    const res = await register({ name: "Lost Reply", phone: "9222222222" }, await makePhoto());
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    assert.equal(puts().length, before + 1, "uploaded once, not again under the next number");
+    const { rows } = await pool.query("SELECT storage_key, photo_no FROM registration_photos WHERE registration_id = $1", [res.body.data.id]);
+    assert.equal(rows[0].photo_no, 1);
+    assert.ok(objects.has(rows[0].storage_key));
   });
 
   test("a retried submit with the same submission_id returns the same registration without re-uploading", async () => {

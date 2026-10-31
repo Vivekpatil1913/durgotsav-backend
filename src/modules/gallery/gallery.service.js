@@ -39,11 +39,12 @@ function filters({ district_id, fort_id }, params) {
 // once, other instances within 15 s.
 const LARGE_TTL_MS = 60_000;
 const SMALL_TTL_MS = 15_000;
-const summaries = createCache({ ttlMs: SMALL_TTL_MS, maxEntries: 1_000, name: "gallery-summary" });
-const largeSummaries = createCache({ ttlMs: LARGE_TTL_MS, maxEntries: 1_000, name: "gallery-summary-large" });
+// Public pages: a visitor never waits for a recount (maxStaleMs: Infinity) — an old summary is answered while one refresh runs
+const summaries = createCache({ ttlMs: SMALL_TTL_MS, maxEntries: 1_000, maxStaleMs: Infinity, name: "gallery-summary" });
+const largeSummaries = createCache({ ttlMs: LARGE_TTL_MS, maxEntries: 1_000, maxStaleMs: Infinity, name: "gallery-summary-large" });
 // Filters whose set has reached BLOCK photos: from then on their summaries come from largeSummaries
 const largeSets = new Set();
-const latestPhotos = createCache({ ttlMs: SMALL_TTL_MS, maxEntries: 10, name: "gallery-latest" });
+const latestPhotos = createCache({ ttlMs: SMALL_TTL_MS, maxEntries: 10, maxStaleMs: Infinity, name: "gallery-latest" });
 // The Website Gallery tabs' counts per access scope (scopeStats below)
 const scopeStatsCache = createCache({ ttlMs: 60_000, maxEntries: 300, name: "website-gallery-stats" });
 

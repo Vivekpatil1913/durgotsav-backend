@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { query } from "../db/pool.js";
-import { admission } from "../middleware/admission.js";
+import { admission, whileAdmitted } from "../middleware/admission.js";
 import { cache } from "../middleware/cache.js";
 import {
   contactLimiter, downloadLimiter, lookupLimiter, lookupPageLimiter, registerLimiter, verifyLimiter, visitLimiter,
@@ -149,19 +149,19 @@ const registrationAdmission = admission({
   message: "Many registrations are being uploaded right now. Please try again in a few seconds",
 });
 router.post("/registrations", registerLimiter, registrationAdmission, imageUploadFields(["photo", "photo_2"]), requireCaptcha, validate({ body: registerSchema }),
-  asyncHandler(async (req, res) => {
+  asyncHandler(whileAdmitted(async (req, res) => {
     const files = [req.files?.photo?.[0], req.files?.photo_2?.[0]];
     const { replayed, ...result } = await registrations.register(req.body, files, { ip: req.ip, userAgent: req.get("user-agent") });
     if (!replayed) wakeSmsWorker();
     res.status(replayed ? 200 : 201).json({ data: result });
-  }));
+  })));
 
 router.get("/registrations/status", lookupLimiter, validate({ query: lookupSchema }),
   asyncHandler(async (req, res) => res.json({ data: await registrations.publicStatus(req.query.registration, req.query.phone) })));
 
 // A new photo is the same work as a registration's, so it waits its turn behind the same gate
 router.post("/registrations/:registration/resubmit", lookupLimiter, registrationAdmission, imageUpload("photo"), validate({ body: resubmitSchema }),
-  asyncHandler(async (req, res) => res.json({ data: await registrations.resubmit(req.params.registration, req.body, req.file) })));
+  asyncHandler(whileAdmitted(async (req, res) => res.json({ data: await registrations.resubmit(req.params.registration, req.body, req.file) }))));
 
 // ------------------------------------------------------------- certificates (SRS v2.1 §5, §7)
 const FILE_TYPES = { pdf: "application/pdf", jpg: "image/jpeg" };

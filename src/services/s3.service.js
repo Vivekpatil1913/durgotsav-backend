@@ -1,7 +1,7 @@
 // Amazon S3 access for private participant originals.
 // Credentials come from the AWS SDK default provider chain — on EC2 that is the instance role (IMDS).
 // No access keys are read or passed here, and credentials are never logged.
-import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { env } from "../config/env.js";
 import { AppError } from "../utils/errors.js";
@@ -64,6 +64,16 @@ export async function putObjectIfAbsent({ key, body, contentType, metadata }) {
     // 412: an object exists; 409: a concurrent conditional write to the same key is in flight
     if (err?.name === "PreconditionFailed" || [409, 412].includes(httpStatus(err))) throw new ObjectExistsError(key);
     throw operationalError(err, "s3:PutObject", key);
+  }
+}
+
+// The metadata of the object at key, or null when there is none or it cannot be read
+export async function objectMetadata(key) {
+  try {
+    const head = await s3Transport.send(new HeadObjectCommand({ Bucket: bucket(), Key: key }));
+    return head.Metadata ?? {};
+  } catch {
+    return null;
   }
 }
 

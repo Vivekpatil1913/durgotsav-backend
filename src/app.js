@@ -7,7 +7,7 @@ import { pinoHttp } from "pino-http";
 import { env } from "./config/env.js";
 import { paths } from "./config/paths.js";
 import { errorHandler, notFoundHandler } from "./middleware/error.js";
-import { apiLimiter } from "./middleware/rateLimit.js";
+import { apiLimiter, publicReadLimiter } from "./middleware/rateLimit.js";
 import { authRouter } from "./modules/auth/auth.module.js";
 import { publicAwardRouter } from "./modules/award/award.routes.js";
 import adminRoutes from "./routes/admin.routes.js";
@@ -44,7 +44,7 @@ export function createApp() {
   // must not share the public per-address budget, so they are routed before it
   app.use("/api/auth", authRouter);
   app.use("/api/admin", adminRoutes);
-  app.use("/api", apiLimiter);
+  app.use("/api", apiLimiter, publicReadLimiter);
   app.use("/api/shivdurg-award", publicAwardRouter);
   app.use("/api", publicRoutes);
   app.use(seoRoutes);

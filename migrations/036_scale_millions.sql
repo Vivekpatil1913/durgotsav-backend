@@ -1,9 +1,17 @@
 -- Amrut Durgotsav 2026 — migration 036
 -- Scale for millions of registrations: no request may read a whole large table, and no deploy step may lock one for
 -- long. This file runs inside migrate.js's transaction. On a live database with millions of rows, deploy.sh first runs
--- `node scripts/create-indexes-live.js`, which builds the same indexes CONCURRENTLY (no write lock), so the
--- CREATE INDEX IF NOT EXISTS below have nothing left to do. The DROP INDEX statements come last: each needs a brief
--- exclusive lock, held only until the COMMIT that follows.
+-- `node scripts/create-indexes-live.js`, which builds the same indexes CONCURRENTLY (no write lock) and then drops the
+-- superseded ones CONCURRENTLY, so the index statements below find nothing left to do and take no lock. On a new or
+-- small database they do the work here; the DROP INDEX statements come last.
+
+-- Builds an index only when it is missing. A plain CREATE INDEX IF NOT EXISTS locks its table against writes even when the
+-- index exists (PostgreSQL takes the lock before it looks at the name); on a live database, where
+-- scripts/create-indexes-live.js has built every index CONCURRENTLY beforehand, this costs no lock at all.
+CREATE OR REPLACE FUNCTION pg_temp.create_index_if_missing(index_name text, ddl text) RETURNS void LANGUAGE plpgsql AS $f$
+BEGIN
+  IF to_regclass(index_name) IS NULL THEN EXECUTE ddl; END IF;
+END $f$;
 
 -- ---------------------------------------------------------------- near-duplicate photos (multi-index hashing)
 -- Every registration looks for an earlier photo within 6 bits (Hamming distance) of its 64-bit difference hash. Comparing
@@ -22,45 +30,45 @@ CREATE OR REPLACE FUNCTION dhash_band_keys(hash bpchar) RETURNS integer[]
       196608 + ('x' || substr(hash, 13, 4))::bit(16)::int]
   END
 $$;
-CREATE INDEX IF NOT EXISTS registration_photos_dhash_keys_gin ON registration_photos USING GIN (dhash_band_keys(dhash));
+SELECT pg_temp.create_index_if_missing('registration_photos_dhash_keys_gin', $i$CREATE INDEX registration_photos_dhash_keys_gin ON registration_photos USING GIN (dhash_band_keys(dhash))$i$);
 
 -- ---------------------------------------------------------------- photos of one registration
 -- Every registration_id index was partial (WHERE is_current), so the photo history of one registration (admin detail),
 -- un-featuring on reject and the S3 photo numbering read the whole table. photo_no last: MAX(photo_no) is index-only.
-CREATE INDEX IF NOT EXISTS registration_photos_registration_idx ON registration_photos (registration_id, photo_no);
+SELECT pg_temp.create_index_if_missing('registration_photos_registration_idx', $i$CREATE INDEX registration_photos_registration_idx ON registration_photos (registration_id, photo_no)$i$);
 -- The moderation "possible duplicates" filter: only flagged main photos (a small set) instead of every current photo
-CREATE INDEX IF NOT EXISTS registration_photos_dup_main_idx ON registration_photos (registration_id)
-  WHERE is_current AND position = 1 AND duplicate_of_photo_id IS NOT NULL;
+SELECT pg_temp.create_index_if_missing('registration_photos_dup_main_idx', $i$CREATE INDEX registration_photos_dup_main_idx ON registration_photos (registration_id)
+  WHERE is_current AND position = 1 AND duplicate_of_photo_id IS NOT NULL$i$);
 -- S3 numbering looks up the highest number in an object folder (storage_key LIKE 'folder/%'). text_pattern_ops makes
 -- that prefix match indexable whatever the database collation; uniqueness is unchanged.
-CREATE UNIQUE INDEX IF NOT EXISTS registration_photos_storage_key_pattern_uq
-  ON registration_photos (storage_key text_pattern_ops) INCLUDE (photo_no) WHERE storage_key IS NOT NULL;
+SELECT pg_temp.create_index_if_missing('registration_photos_storage_key_pattern_uq', $i$CREATE UNIQUE INDEX registration_photos_storage_key_pattern_uq
+  ON registration_photos (storage_key text_pattern_ops) INCLUDE (photo_no) WHERE storage_key IS NOT NULL$i$);
 
 -- ---------------------------------------------------------------- registrations
 -- Admin search for a mobile / WhatsApp number is a contains-search ('%98765%'); like name / email / organisation
 -- (migration 006) it needs a trigram index, otherwise every search reads every registration.
-CREATE INDEX IF NOT EXISTS registrations_phone_trgm
-  ON registrations USING GIN (phone gin_trgm_ops) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS registrations_whatsapp_trgm
-  ON registrations USING GIN (whatsapp_number gin_trgm_ops) WHERE deleted_at IS NULL;
+SELECT pg_temp.create_index_if_missing('registrations_phone_trgm', $i$CREATE INDEX registrations_phone_trgm
+  ON registrations USING GIN (phone gin_trgm_ops) WHERE deleted_at IS NULL$i$);
+SELECT pg_temp.create_index_if_missing('registrations_whatsapp_trgm', $i$CREATE INDEX registrations_whatsapp_trgm
+  ON registrations USING GIN (whatsapp_number gin_trgm_ops) WHERE deleted_at IS NULL$i$);
 -- Moderators scoped to a division read their queue in order (and count it) from one range of this index
-CREATE INDEX IF NOT EXISTS registrations_div_status_created_idx
-  ON registrations (division_id, status, created_at, id) WHERE deleted_at IS NULL;
+SELECT pg_temp.create_index_if_missing('registrations_div_status_created_idx', $i$CREATE INDEX registrations_div_status_created_idx
+  ON registrations (division_id, status, created_at, id) WHERE deleted_at IS NULL$i$);
 -- Trash (deleted registrations): a small set, listed newest or oldest first
-CREATE INDEX IF NOT EXISTS registrations_trash_idx ON registrations (created_at, id) WHERE deleted_at IS NOT NULL;
+SELECT pg_temp.create_index_if_missing('registrations_trash_idx', $i$CREATE INDEX registrations_trash_idx ON registrations (created_at, id) WHERE deleted_at IS NOT NULL$i$);
 -- division and status are correlated (a division's queue); lets the planner estimate scoped queues correctly
 CREATE STATISTICS IF NOT EXISTS registrations_div_status_stx (mcv) ON division_id, status FROM registrations;
 
 -- ---------------------------------------------------------------- certificates, email log, audit log
 -- The "revoked" filter of the certificates list: a small set, read in list order
-CREATE INDEX IF NOT EXISTS certificates_revoked_issued_idx ON certificates (issued_at DESC, id DESC) WHERE revoked_at IS NOT NULL;
+SELECT pg_temp.create_index_if_missing('certificates_revoked_issued_idx', $i$CREATE INDEX certificates_revoked_issued_idx ON certificates (issued_at DESC, id DESC) WHERE revoked_at IS NOT NULL$i$);
 -- Download counters and email/regeneration stamps update certificate rows; free space on each page keeps those updates
 -- on the same page (HOT), without new entries in the table's indexes. Applies to pages written from now on.
 ALTER TABLE certificates SET (fillfactor = 90);
 -- Foreign key of the email log (ON DELETE CASCADE from its job)
-CREATE INDEX IF NOT EXISTS certificate_email_log_job_idx ON certificate_email_log (job_id);
+SELECT pg_temp.create_index_if_missing('certificate_email_log_job_idx', $i$CREATE INDEX certificate_email_log_job_idx ON certificate_email_log (job_id)$i$);
 -- The audit log "by admin" filter
-CREATE INDEX IF NOT EXISTS audit_logs_admin_idx ON audit_logs (admin_id, id);
+SELECT pg_temp.create_index_if_missing('audit_logs_admin_idx', $i$CREATE INDEX audit_logs_admin_idx ON audit_logs (admin_id, id)$i$);
 
 -- ---------------------------------------------------------------- vacuum after inserts
 -- Insert-only growth otherwise waits for 20% new rows before autovacuum sets the visibility map (index-only scans) and

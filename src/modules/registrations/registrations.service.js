@@ -2,10 +2,11 @@ import { env } from "../../config/env.js";
 import { query, withTransaction } from "../../db/pool.js";
 import { prepareParticipantPhoto, removeFiles, writeLocalOriginal, writePublicCopies } from "../../services/image.service.js";
 import { istDateFolder, participantFolderName, photoObjectKey } from "../../services/participant-photo-keys.js";
-import { deleteObject, ObjectExistsError, presignGetUrl, putObjectIfAbsent } from "../../services/s3.service.js";
+import { deleteObject, objectMetadata, ObjectExistsError, presignGetUrl, putObjectIfAbsent } from "../../services/s3.service.js";
 import { logger } from "../../utils/logger.js";
 import { badRequest, conflict, forbidden, notFound, AppError } from "../../utils/errors.js";
 import { formatRegistrationNo, latinDigits, likeContains, likePrefix, parseRegistrationNo } from "../../utils/format.js";
+import { createCache } from "../../utils/cache.js";
 import { assertBrowsable, cappedCount, cappedMeta, COUNT_CAP, paginate, sortSql } from "../../utils/pagination.js";
 import { registrationWindow } from "../settings/settings.service.js";
 import * as certificates from "../certificates/certificates.service.js";
@@ -17,6 +18,8 @@ import { enqueueRejectionEmails } from "./rejection-emails.js";
 const NEAR_DUPLICATE_BITS = 6;
 // Upper bound on the photos compared exactly per near-duplicate check (see findDuplicatePhoto)
 const NEAR_DUPLICATE_CANDIDATES = 20_000;
+// Acknowledgment SMS per mobile number per day (see register)
+const ACK_SMS_PER_DAY = 5;
 
 const PHOTO_JOIN = "LEFT JOIN registration_photos p ON p.registration_id = r.id AND p.is_current AND p.position = 1";
 // Only the duplicates / featured filters read the main photo; without them counts and neighbour lookups skip that join
@@ -83,8 +86,12 @@ export function dhashProbeKeys(hex) {
  * NEAR_DUPLICATE_BITS). Both lookups go through indexes, so the cost does not grow with the number of photos, and both
  * run on the pool before the registration's transaction opens. The near-copy candidates (photos sharing a band key) are
  * collected first — MATERIALIZED, so the planner cannot instead walk the table in id order hoping to meet a match — and
- * compared exactly afterwards. A band value that a great many photos share (flat sky, a plain wall) could make that set
- * large, so at most NEAR_DUPLICATE_CANDIDATES are compared; exact copies are always found, and an admin reviews every photo.
+ * compared exactly afterwards. A band value that a great many photos share (flat sky, a plain wall) says little about a
+ * photo and would swamp that set, so such values are left out of the probe (hotBandKeys); as a last bound at most
+ * NEAR_DUPLICATE_CANDIDATES are compared. A near copy that matches only on such a band can be missed; exact copies are
+ * always found, and an admin reviews every photo.
+ * Whether a candidate's registration is still live is one primary-key probe per remaining candidate (a scalar
+ * subquery), so the planner never joins the candidates to the whole registrations table.
  */
 async function findDuplicatePhoto(photo, registrationId) {
   const exact = await query(
@@ -95,19 +102,61 @@ async function findDuplicatePhoto(photo, registrationId) {
     [photo.sha256, registrationId],
   );
   if (exact.rows[0]) return exact.rows[0].id;
+  const hot = await hotBandKeys().catch(() => new Set());
+  const probes = dhashProbeKeys(photo.dhash).filter((key) => !hot.has(key));
+  if (!probes.length) return null;
   const near = await query(
     `WITH candidates AS MATERIALIZED (
        SELECT p.id, p.registration_id, p.dhash FROM registration_photos p
        WHERE dhash_band_keys(p.dhash) && $1::int[] AND p.registration_id <> $3
        LIMIT ${NEAR_DUPLICATE_CANDIDATES})
      SELECT c.id FROM candidates c
-     JOIN registrations r ON r.id = c.registration_id AND r.deleted_at IS NULL
      WHERE bit_count(('x' || c.dhash)::bit(64) # ('x' || $2)::bit(64)) <= $4
+       AND (SELECT r.deleted_at IS NULL FROM registrations r WHERE r.id = c.registration_id)
      ORDER BY c.id LIMIT 1`,
-    [dhashProbeKeys(photo.dhash), photo.dhash, registrationId, NEAR_DUPLICATE_BITS],
+    [probes, photo.dhash, registrationId, NEAR_DUPLICATE_BITS],
   );
   return near.rows[0]?.id ?? null;
 }
+
+// Band keys that more than HOT_BAND_ROWS photos share, from the band-key index's own statistics (kept current by
+// ANALYZE / autovacuum), read once an hour per process
+const HOT_BAND_ROWS = 5_000;
+const hotBands = createCache({ ttlMs: 60 * 60_000, maxStaleMs: Infinity, name: "dhash-hot-bands" });
+const hotBandKeys = () => hotBands.get("all", async () => {
+  const { rows } = await query(
+    `SELECT s.most_common_elems::text::int[] AS keys, s.most_common_elem_freqs AS freqs,
+            (SELECT reltuples FROM pg_class WHERE relname = 'registration_photos') AS photos
+     FROM pg_stats s WHERE s.tablename = 'registration_photos_dhash_keys_gin'`,
+  );
+  const stats = rows[0];
+  if (!stats?.keys) return new Set();
+  return new Set(stats.keys.filter((key, i) => stats.freqs[i] * Math.max(stats.photos, 0) > HOT_BAND_ROWS));
+});
+
+// Two submissions of the same file at the same moment cannot see each other's photo before either commits. Inside the
+// transaction each takes a lock on the file's hash (in hash order, so two registrations never wait on each other in a
+// circle) and looks again: the later one then finds the earlier one's photo.
+async function lockedExactDuplicates(client, photos, registrationId) {
+  for (const sha of [...new Set(photos.map((p) => p.photo.sha256))].sort()) {
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`photo:${sha}`]);
+  }
+  for (const p of photos) {
+    if (p.duplicateOf) continue;
+    const { rows } = await client.query(
+      `SELECT p.id FROM registration_photos p
+       JOIN registrations r ON r.id = p.registration_id AND r.deleted_at IS NULL
+       WHERE p.sha256 = $1 AND p.registration_id <> $2
+       ORDER BY p.id LIMIT 1`,
+      [p.photo.sha256, registrationId],
+    );
+    p.duplicateOf = rows[0]?.id ?? null;
+  }
+}
+
+// After a failed transaction: were the rows saved after all (the COMMIT reply lost on the way)? Then the stored photos
+// belong to them and must stay. If even this cannot be checked, they stay too — a stray file is cheaper than a lost photo.
+const savedAfterAll = (sql, params) => query(sql, params).then((r) => r.rowCount > 0, () => true);
 
 async function assertReferences({ district_id, taluka_id, fort_id }) {
   const [d, t, f] = await Promise.all([
@@ -147,8 +196,13 @@ async function uploadOriginalToS3(registration, prepared, after = 0) {
       });
       return { storage: "s3", storage_key: key, photo_no: number, file_name: fileName };
     } catch (err) {
-      if (err instanceof ObjectExistsError && attempt < 20) continue;
-      throw err;
+      if (!(err instanceof ObjectExistsError && attempt < 20)) throw err;
+      // The SDK retried a PUT whose reply was lost after S3 had stored it: that object is this very photo, so keep it
+      // instead of storing a second copy under the next number and leaving the first one behind
+      const meta = await objectMetadata(key);
+      if (meta?.["registration-id"] === String(registration.id) && meta.sha256 === prepared.sha256) {
+        return { storage: "s3", storage_key: key, photo_no: number, file_name: fileName };
+      }
     }
   }
 }
@@ -211,16 +265,17 @@ async function findBySubmission(submissionId, phone) {
  * Returned token: the participant's own status / certificate link (/c/<token>), also sent by SMS.
  */
 export async function register(input, files, meta) {
+  // A retried submission that was saved gets its registration back, even after the window has closed
+  if (input.submission_id) {
+    const existing = await findBySubmission(input.submission_id, input.phone);
+    if (existing) return existing;
+  }
   const window = await registrationWindow();
   if (!window.open) {
     throw new AppError(403, window.reason === "not_started" ? "Registration has not opened yet" : "Registration is closed", {
       code: "REGISTRATION_CLOSED",
       details: window,
     });
-  }
-  if (input.submission_id) {
-    const existing = await findBySubmission(input.submission_id, input.phone);
-    if (existing) return existing;
   }
   const [file, file2] = files;
   if (!file) throw badRequest("Please upload a photo of you with your fort replica", { photo: "Photo is required" });
@@ -263,12 +318,22 @@ export async function register(input, files, meta) {
           input.whatsapp_number ?? null],
       );
       const registration = rows[0];
+      await lockedExactDuplicates(client, photos, registration.id);
       // A new registration has no earlier photo to retire
       for (const { photo, position, duplicateOf } of photos) {
         await insertPhoto(client, registration.id, photo, duplicateOf, position, { retire: false });
       }
-      // The acknowledgment SMS commits with the registration; the SMS worker sends it
-      await sms.enqueue(client, "registration_ack", [{ id: registration.id, phone: input.phone }]);
+      // The acknowledgment SMS commits with the registration; the SMS worker sends it. It goes to whatever number was
+      // typed in, so a number gets it for at most ACK_SMS_PER_DAY registrations a day: a script (the look-alike CAPTCHA
+      // does not stop one) cannot flood a stranger's phone or the SMS bill. Every registration is still saved, and the
+      // website lists all of a number's registrations.
+      // One probe of the (phone, id) index: is the number's ACK_SMS_PER_DAY-th earlier registration less than a day old?
+      const { rows: [nth] } = await client.query(
+        `SELECT created_at > NOW() - INTERVAL '1 day' AS recent FROM registrations
+         WHERE phone = $1 AND id < $2 AND deleted_at IS NULL ORDER BY id DESC OFFSET ${ACK_SMS_PER_DAY - 1} LIMIT 1`,
+        [input.phone, registration.id],
+      );
+      if (!nth?.recent) await sms.enqueue(client, "registration_ack", [{ id: registration.id, phone: input.phone }]);
       return {
         id: registration.id,
         registration_no: formatRegistrationNo(registration.id),
@@ -278,7 +343,7 @@ export async function register(input, files, meta) {
       };
     });
   } catch (err) {
-    await discardWritten(written);
+    if (!(await savedAfterAll("SELECT 1 FROM registrations WHERE id = $1", [owner.id]))) await discardWritten(written);
     if (err.code === "23505" && err.constraint === "registrations_submission_id_key") {
       const existing = await findBySubmission(input.submission_id, input.phone);
       if (existing) return existing;
@@ -342,15 +407,17 @@ export async function resubmit(registrationInput, { phone, replica_notes }, file
   if (!file && !replica_notes) throw badRequest("Please upload a new photo or add a note");
   const prepared = file ? await prepareParticipantPhoto(file) : null;
   const written = newWritten();
+  let photo = null;
   try {
     // Stored and checked before the transaction, like a new registration's photo
-    const photo = prepared ? await savePhoto({ id: r.id, name: r.name, phone: r.phone }, prepared, written) : null;
-    const duplicateOf = photo ? await findDuplicatePhoto(photo, r.id) : null;
+    photo = prepared ? await savePhoto({ id: r.id, name: r.name, phone: r.phone }, prepared, written) : null;
+    const checked = photo ? [{ photo, duplicateOf: await findDuplicatePhoto(photo, r.id) }] : [];
     await withTransaction(async (client) => {
       const { rowCount } = await client.query(
         "SELECT 1 FROM registrations WHERE id = $1 AND status = 'info_requested' FOR UPDATE", [r.id]);
       if (!rowCount) throw conflict("This registration is not waiting for more information", "NOT_AWAITING_INFO");
-      if (photo) await insertPhoto(client, r.id, photo, duplicateOf);
+      await lockedExactDuplicates(client, checked, r.id);
+      if (photo) await insertPhoto(client, r.id, photo, checked[0].duplicateOf);
       // Back in the review queue; a certificate comes only with the next approval
       await client.query(
         `UPDATE registrations SET status = 'pending', replica_notes = COALESCE($2, replica_notes) WHERE id = $1`,
@@ -358,7 +425,9 @@ export async function resubmit(registrationInput, { phone, replica_notes }, file
       );
     });
   } catch (err) {
-    await discardWritten(written);
+    if (!(photo && (await savedAfterAll("SELECT 1 FROM registration_photos WHERE image_path = $1", [photo.image_path])))) {
+      await discardWritten(written);
+    }
     throw err;
   }
   return publicStatus(r.id, phone);
@@ -402,18 +471,23 @@ function buildFilters(f, allowedDivisionIds) {
     // registration number, mobile and WhatsApp (trigram indexes, migration 036); text searches name, email and
     // organisation (trigram indexes, migration 006). Contains-search needs 3 characters (a trigram); shorter numbers
     // only match a registration number.
-    const q = latinDigits(f.q);
+    // Numbers are stored with Latin digits; names as typed, so a name is searched as typed and, if it had Marathi
+    // digits, also with Latin ones
+    const typed = String(f.q).trim();
+    const q = latinDigits(typed);
     const id = parseRegistrationNo(q);
     const idClause = id ? `r.id = ${Number(id)}` : null;
     const numeric = /^\d+$/.test(q);
     if (q.length < 3) {
       where.push(idClause ?? "FALSE");
     } else {
-      params.push(likeContains(q));
-      const like = `$${params.length}`;
+      const likes = (numeric || typed === q ? [q] : [typed, q]).map((text) => {
+        params.push(likeContains(text));
+        return `$${params.length}`;
+      });
       const branches = numeric
-        ? [`r.phone LIKE ${like}`, `r.whatsapp_number LIKE ${like}`]
-        : [`r.name ILIKE ${like}`, `r.email ILIKE ${like}`, `r.organization_name ILIKE ${like}`];
+        ? [`r.phone LIKE ${likes[0]}`, `r.whatsapp_number LIKE ${likes[0]}`]
+        : likes.flatMap((like) => [`r.name ILIKE ${like}`, `r.email ILIKE ${like}`, `r.organization_name ILIKE ${like}`]);
       where.push(`(${[...branches, idClause].filter(Boolean).join(" OR ")})`);
     }
   }
@@ -427,26 +501,29 @@ const countFrom = (f, where) => `FROM registrations r ${needsPhoto(f) ? PHOTO_JO
 
 /**
  * One page of the admin list, and how many records match (counting stops at COUNT_CAP; pages past it are not browsed).
- * A search is counted first: a narrow one (under the cap) is collected through the trigram indexes and only those rows
- * are sorted — the OFFSET 0 fence keeps the planner from instead walking the whole sort index hoping to meet matches.
- * A broad one has matches so dense that walking the sort index finds a page at once.
+ * The page's ids are picked from the registrations alone, and only those rows are joined to names, photo and
+ * certificate: a deep page skips its OFFSET rows on the indexes instead of joining every one of them.
+ * A search is counted first: a narrow one (under the cap) collects its matches once through the trigram indexes
+ * (ARRAY(…): computed first, whatever the planner estimates) and only those are sorted; a broad one has matches so
+ * dense that walking the sort index finds a page at once.
  */
 export async function adminList(filters, allowedDivisionIds) {
   assertBrowsable(filters, "registrations");
   const { where, params, search } = buildFilters(filters, allowedDivisionIds);
   const { limit, offset } = paginate(filters);
-  const order = `ORDER BY ${sortSql(SORTS, sortOf(filters), "created_at")} LIMIT ${limit} OFFSET ${offset}`;
+  const sort = sortSql(SORTS, sortOf(filters), "created_at");
+  const page = (from) => query(
+    `${SELECT_LIST} WHERE r.id = ANY(ARRAY(SELECT r.id ${from} ORDER BY ${sort} LIMIT ${limit} OFFSET ${offset})) ORDER BY ${sort}`,
+    params,
+  );
   let rows;
   let count;
   if (search) {
     count = await cappedCount(query, countFrom(filters, where), params);
-    const fenced = count.capped ? where : `WHERE r.id IN (SELECT r.id ${countFrom(filters, where)} OFFSET 0)`;
-    ({ rows } = await query(`${SELECT_LIST} ${fenced} ${order}`, params));
+    const matches = `FROM registrations r WHERE r.id = ANY(ARRAY(SELECT r.id ${countFrom(filters, where)}))`;
+    ({ rows } = await page(count.capped ? countFrom(filters, where) : matches));
   } else {
-    [{ rows }, count] = await Promise.all([
-      query(`${SELECT_LIST} ${where} ${order}`, params),
-      cappedCount(query, countFrom(filters, where), params),
-    ]);
+    [{ rows }, count] = await Promise.all([page(countFrom(filters, where)), cappedCount(query, countFrom(filters, where), params)]);
   }
   return { data: rows.map(decorate), meta: cappedMeta(filters, count) };
 }
@@ -498,21 +575,18 @@ export async function neighbors(id, filters, allowedDivisionIds) {
 const EXPORT_BATCH = 1000;
 
 /**
- * Every matching registration in list order, in batches. Each batch is its own short query that continues after the
- * last row of the one before (keyset on the sort columns, read from that row inside SQL), so a slow download holds no
- * connection, transaction or snapshot between batches, however long the file.
+ * Every matching registration, in registration-number order, in batches. Each batch is its own short query that
+ * continues after the last registration number of the one before, so a slow download holds no connection, transaction
+ * or snapshot between batches, however long the file. The number never changes, so a record edited during the download
+ * (its status, name or mobile) is still written exactly once — which a cursor on an editable column could not promise.
  */
 export async function* adminExportStream(filters, allowedDivisionIds) {
   const { where, params } = buildFilters(filters, allowedDivisionIds);
-  const s = sortOf(filters);
-  const { cols, dir } = SORTS[s.sort] ?? SORTS.created_at;
-  const desc = (s.dir ?? dir) === "desc";
-  const order = sortSql(SORTS, s, "created_at");
-  const after = `AND (${cols}) ${desc ? "<" : ">"} (SELECT ${cols.replaceAll("r.", "c.")} FROM registrations c WHERE c.id = $${params.length + 1})`;
+  const after = `AND r.id > $${params.length + 1}`;
   let last = null;
   for (;;) {
     const { rows } = await query(
-      `${SELECT_LIST} ${where} ${last === null ? "" : after} ORDER BY ${order} LIMIT ${EXPORT_BATCH}`,
+      `${SELECT_LIST} ${where} ${last === null ? "" : after} ORDER BY r.id LIMIT ${EXPORT_BATCH}`,
       last === null ? params : [...params, last],
     );
     if (rows.length) yield rows.map(decorate);

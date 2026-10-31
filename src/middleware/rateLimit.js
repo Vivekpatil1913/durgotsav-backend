@@ -32,14 +32,15 @@ const make = (windowMinutes, limit, message, options = {}) =>
     ...options,
   });
 
-// Public GETs the browser and any CDN may cache (Cache-Control public): each page view of the website makes several,
-// and a whole school or mobile-operator NAT can share one address, so they are not counted. Lists that page through
-// the database (gallery, album, podcasts) still are.
+// Public GETs the browser may cache (Cache-Control public): each page view of the website makes several, and a whole
+// school or mobile-operator NAT can share one address. They get their own, much larger budget instead of the general
+// one, so busy shared addresses keep working while one client still cannot flood the database through them. Lists that
+// page through the database (gallery, album, podcasts) stay in the general budget.
 const CACHEABLE_GET = /^\/(?:home|stats|settings|visits|divisions|districts|talukas|forts(?:\/[a-z0-9-]+)?|events|videos|testimonials|faqs|announcements|pages\/[a-z0-9-]+|shivdurg-award)$/;
+const isCacheableGet = (req) => req.method === "GET" && CACHEABLE_GET.test(req.path);
 
-export const apiLimiter = make(15, 1500, "Too many requests, please slow down", {
-  skip: (req) => req.method === "GET" && CACHEABLE_GET.test(req.path),
-});
+export const apiLimiter = make(15, 1500, "Too many requests, please slow down", { skip: isCacheableGet });
+export const publicReadLimiter = make(15, 6000, "Too many requests, please slow down", { skip: (req) => !isCacheableGet(req) });
 export const loginLimiter    = make(15,  10, "Too many login attempts. Try again in 15 minutes");
 // Any number of registrations may come from one mobile number or one network (a school, a cyber café, a mobile
 // operator's shared address). Each one already needs a fresh "I am not a robot" tick and waits its turn for the photo
@@ -48,12 +49,12 @@ export const registerLimiter = make(60, 1000, "Too many registrations from this 
 // Certificate/status lookups need registration no + mobile; this stops mobile-number guessing
 export const lookupLimiter   = make(15,  40, "Too many lookups. Try again in a few minutes");
 // Further pages of one mobile number's registrations: the signed lookup token (issued after a CAPTCHA-checked lookup)
-// already proves the number was looked up, so pages are counted per number, not against the per-network lookup budget —
-// a number with hundreds of registrations can be paged through
+// already proves the number was looked up, so pages are counted per number and network, not against the per-network
+// lookup budget — a number with hundreds of registrations can be paged through, and no other network can use up its pages
 export const lookupPageLimiter = make(15, 600, "Too many pages. Try again in a few minutes", {
   keyGenerator: (req) => {
     const phone = parseLookupToken(String(req.query.lookup_token ?? ""));
-    return phone ? `lookup:${phone}` : clientKey(req);
+    return phone ? `lookup:${phone}:${clientKey(req)}` : clientKey(req);
   },
 });
 // Downloads through signed certificate links (cannot be guessed): a family or a school fetches many certificates, as

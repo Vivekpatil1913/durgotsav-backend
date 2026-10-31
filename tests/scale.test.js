@@ -64,6 +64,17 @@ describe("duplicate photos", () => {
     assert.equal((await photoOf(other.body.data.id)).duplicate_of_photo_id, null);
   });
 
+  test("the same photo sent twice at the same moment is flagged on the later registration", async () => {
+    const photo = await makePhoto();
+    const [a, b] = await Promise.all([register({ phone: "9810000005" }, photo), register({ phone: "9810000006" }, photo)]);
+    assert.equal(a.status, 201);
+    assert.equal(b.status, 201);
+    const [pa, pb] = [await photoOf(a.body.data.id), await photoOf(b.body.data.id)];
+    const flagged = [pa, pb].filter((p) => p.duplicate_of_photo_id);
+    assert.equal(flagged.length, 1, "exactly one of the two is flagged");
+    assert.equal(flagged[0].duplicate_of_photo_id, Math.min(pa.id, pb.id));
+  });
+
   test("the band-key index answers the near-duplicate probe", async () => {
     const { rows } = await pool.query("SELECT dhash, dhash_band_keys(dhash) AS keys FROM registration_photos LIMIT 1");
     assert.equal(rows[0].keys.length, 4);
@@ -101,6 +112,13 @@ describe("admin list: capped counts, page depth, search", () => {
     assert.equal(short.body.meta.total, 0, "2 digits: registration number only (none is 77)");
   });
 
+  test("a name written with Marathi digits is found by a search typed with them", async () => {
+    const reg = (await register({ phone: "9810000099", name: "पाटील कुटुंब १२३" })).body.data;
+    const res = await list({ q: "कुटुंब १२३" });
+    assert.equal(res.status, 200);
+    assert.ok(res.body.data.some((r) => r.id === reg.id), JSON.stringify(res.body.meta));
+  });
+
   test("a narrow text search returns the matches in list order", async () => {
     const res = await list({ q: "Bulk 111", sort: "registration_no", dir: "asc" });
     assert.equal(res.status, 200);
@@ -117,7 +135,7 @@ describe("admin list: capped counts, page depth, search", () => {
     assert.equal((await request(app).get("/api/admin/registrations/3000000000").set(auth())).status, 400);
   });
 
-  test("the CSV export streams every row, in keyset batches, in the list's order", async () => {
+  test("the CSV export streams every row once, in keyset batches, in registration-number order", async () => {
     const total = (await pool.query("SELECT COUNT(*)::int AS n FROM registrations WHERE deleted_at IS NULL")).rows[0].n;
     const res = await request(app).get("/api/admin/registrations/export.csv").set(auth()).query({ sort: "name", dir: "asc" })
       .buffer(true).parse((r, cb) => {
@@ -132,6 +150,8 @@ describe("admin list: capped counts, page depth, search", () => {
     assert.equal(lines.length - 1, total, "every registration once, across batches of 1000");
     const regNos = lines.slice(1).map((l) => l.split(",")[0]);
     assert.equal(new Set(regNos).size, regNos.length, "no row twice");
+    const numbers = regNos.map((n) => Number(n.split("-").pop()));
+    assert.deepEqual(numbers, [...numbers].sort((a, b) => a - b), "registration-number order (a number never changes mid-export)");
   });
 
   test("the detail view caps the count of the same mobile's other registrations", async () => {
@@ -152,6 +172,25 @@ describe("admin list: capped counts, page depth, search", () => {
     assert.equal(res.body.data.position, 1);
     assert.equal(res.body.data.capped, false);
     assert.ok(res.body.data.total > 2000);
+  });
+});
+
+describe("abuse limits that keep registrations unlimited", () => {
+  test("a number gets the acknowledgment SMS for at most 5 registrations a day; all of them are saved", async () => {
+    const phone = "9810000077";
+    for (let i = 0; i < 7; i++) assert.equal((await register({ phone, name: `SMS cap ${i}` })).status, 201);
+    const { rows: [counts] } = await pool.query(
+      `SELECT (SELECT COUNT(*)::int FROM registrations WHERE phone = $1) AS registrations,
+              (SELECT COUNT(*)::int FROM sms_messages WHERE phone = $1 AND purpose = 'registration_ack') AS acks`, [phone]);
+    assert.deepEqual(counts, { registrations: 7, acks: 5 });
+  });
+
+  test("a cut-off upload is answered 400, not as a server error", async () => {
+    const res = await request(app).post("/api/registrations")
+      .set("Content-Type", "multipart/form-data; boundary=----cut")
+      .send(["------cut", 'Content-Disposition: form-data; name="name"', "", "अर्धवट"].join("\r\n"));
+    assert.equal(res.status, 400, JSON.stringify(res.body));
+    assert.equal(res.body.error.code, "BAD_UPLOAD");
   });
 });
 
@@ -232,6 +271,33 @@ describe("rejection emails go through a durable queue", () => {
     const noEmail = (await register({ phone: "9810000034" })).body.data;
     await review(noEmail.id, "reject", "कारण");
     assert.equal((await queued(noEmail.id)).length, 0);
+  });
+
+  test("a second rejection replaces a notice that is still waiting", async () => {
+    const reg = (await register({ phone: "9810000036", email: "twice@test.local" })).body.data;
+    await review(reg.id, "reject", "पहिले कारण");
+    await review(reg.id, "reject", "दुसरे कारण");
+    const rows = await queued(reg.id);
+    assert.deepEqual(rows.map((r) => [r.status, r.error]), [["cancelled", "SUPERSEDED"], ["queued", null]]);
+    const sent = [];
+    await rejections.drainRejectionEmails({ send: async (mail) => sent.push(mail) });
+    assert.equal(sent.length, 1, "one email, with the latest reason");
+    assert.match(sent[0].html, /दुसरे कारण/);
+  });
+
+  test("a mail server that refuses our login is waited for without using up the notice's attempts", async () => {
+    const reg = (await register({ phone: "9810000037", email: "outage@test.local" })).body.data;
+    await review(reg.id, "reject", "कारण");
+    const login = Object.assign(new Error("Invalid login: 535 5.7.8 Username and Password not accepted"), { code: "EAUTH", responseCode: 535 });
+    const totals = await rejections.drainRejectionEmails({ send: async () => { throw login; } });
+    assert.equal(totals.queued, 1);
+    const [row] = await queued(reg.id);
+    assert.equal(row.status, "queued", "not failed for good");
+    assert.equal(row.attempts, 0, "the attempt was given back");
+    assert.ok(new Date(row.run_at) > new Date());
+    const refused = Object.assign(new Error("550 5.1.1 The email account that you tried to reach does not exist"), { code: "EENVELOPE", responseCode: 550 });
+    await pool.query("UPDATE registration_emails SET run_at = NOW() WHERE id = $1", [row.id]);
+    assert.equal((await rejections.drainRejectionEmails({ send: async () => { throw refused; } })).failed, 1, "a refused address fails at once");
   });
 
   test("a refused send is retried later; email switched off keeps the notice queued", async () => {

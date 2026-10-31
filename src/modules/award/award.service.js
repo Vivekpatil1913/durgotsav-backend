@@ -41,7 +41,7 @@ export function nominationWindow(edition, now = new Date()) {
 // first request after INFO_TTL and answer that one request from the old copy (utils/cache.js), so no visitor waits;
 // a submission checks the window against the database anyway.
 const INFO_TTL = 30_000;
-const infoCache = createCache({ ttlMs: INFO_TTL, name: "award-info" });
+const infoCache = createCache({ ttlMs: INFO_TTL, maxStaleMs: Infinity, name: "award-info" }); // public: never waited for
 export const clearInfoCache = () => infoCache.clear();
 
 async function loadPublicInfo() {

@@ -45,7 +45,7 @@ async function ensureUniqueSlug(data, id) {
 
 // The public fort list (every home page and the gallery filters) changes only when an admin edits the forts: it is
 // shared for a minute and dropped by every admin change
-const publicList = createCache({ ttlMs: 60_000, maxEntries: 1, name: "forts" });
+const publicList = createCache({ ttlMs: 60_000, maxEntries: 1, maxStaleMs: Infinity, name: "forts" }); // public: never waited for
 
 export const forts = createCrud({
   table: "forts",
