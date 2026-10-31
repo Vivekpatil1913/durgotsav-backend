@@ -286,6 +286,9 @@ describe("certificate email queue", () => {
     assert.equal(flakyJob.status, "failed");
     assert.equal(flakyJob.attempts, 6, "CERTIFICATE_EMAIL_MAX_ATTEMPTS");
     assert.equal(flakyJob.last_error_code, "SMTP_451");
+    // The queue stats tell the admin page how many of the failed a plain retry leaves alone
+    const stats = (await request(app).get("/api/admin/certificates/email-queue").set(auth())).body.data;
+    assert.deepEqual([stats.failed, stats.rejected], [3, 2]);
 
     // 'Retry failed' starts the others over; neither it nor 'Email pending' sends to a rejected address again
     const retry = await request(app).post("/api/admin/certificates/retry-failed").set(auth());
@@ -303,6 +306,8 @@ describe("certificate email queue", () => {
 
     // ... or once the address has been corrected
     await pool.query("UPDATE registrations SET email = 'fixed-' || email WHERE id = $1", [bad.id]);
+    const corrected = (await request(app).get("/api/admin/certificates/email-queue").set(auth())).body.data;
+    assert.deepEqual([corrected.failed, corrected.rejected], [2, 1], "a corrected address no longer counts as rejected");
     assert.equal((await request(app).post("/api/admin/certificates/retry-failed").set(auth())).body.data.queued, 1);
     await pool.query("UPDATE registrations SET email = 'fixed-' || email WHERE id = $1", [bad2.id]);
     assert.equal(await (await queue.queuePending(null)).done, 1);
@@ -572,5 +577,21 @@ describe("volume", () => {
     const counts = await pool.query("SELECT download_count FROM certificates WHERE registration_id = ANY($1)", [ids]);
     assert.ok(counts.rows.every((c) => c.download_count === delivered.length), "counted once per delivered bundle, never for a refused one");
     console.log(`  'download all' burst: ${delivered.length} delivered, ${refused.length} refused at once`);
+  });
+
+  test("'Retry failed' requeues a burst of failures batch by batch, also before the planner's statistics have seen it", async () => {
+    // Statistics taken while hardly any email had failed, then thousands fail at once — when an admin presses the button.
+    // Joined to its batch as a CTE, the update rescanned the batch for every failed job here: ~10 s per batch.
+    await pool.query("ANALYZE certificate_email_jobs");
+    const burst = await pool.query("UPDATE certificate_email_jobs SET status = 'failed', last_error_code = 'SMTP_451' WHERE status = 'cancelled'");
+    assert.ok(burst.rowCount > 5_000, "more than one batch");
+    const { rows: [failed] } = await pool.query("SELECT COUNT(*)::int AS n FROM certificate_email_jobs WHERE status = 'failed'");
+    const started = Date.now();
+    assert.equal(await queue.retryFailed(null), failed.n);
+    const ms = Date.now() - started;
+    const { rows: [left] } = await pool.query("SELECT COUNT(*)::int AS n FROM certificate_email_jobs WHERE status = 'failed'");
+    assert.equal(left.n, 0);
+    assert.ok(ms < 5_000, `${failed.n} retried in ${ms} ms`);
+    console.log(`  'retry failed' requeued ${failed.n} in ${ms} ms`);
   });
 });

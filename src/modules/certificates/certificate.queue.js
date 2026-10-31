@@ -160,9 +160,9 @@ async function unlock(client) {
 export async function retryFailed(adminId = null, { rejected = false } = {}) {
   let queued = 0;
   for (let after = 0; ;) {
-    // The batch's ids first, then an update by that list (as walkPending does). Joined to the update as a CTE, the
-    // planner may rescan the whole batch for every failed job when its statistics have not caught up with a burst of
-    // failures — just when this is used — and each batch then grows with all failed jobs times BATCH.
+    // The batch's ids first, then an update by that list, as walkPending does. Joined to the update as a CTE, the batch
+    // may be rescanned for every failed job (all failed × BATCH comparisons) while the planner's statistics have not
+    // caught up with a burst of failures — which is just when this runs.
     const { rows } = await query(
       `SELECT id FROM certificate_email_jobs WHERE status = 'failed' AND id > $1 ORDER BY id LIMIT ${BATCH}`,
       [after],
