@@ -209,20 +209,22 @@ describe("website gallery", () => {
 
     res = await toggle(people.ravi.photo, true);
     assert.equal(res.body.data.updated, true);
-    // the change drops this instance's shared counts and latest photos
+    // the change drops this instance's shared gallery totals and latest photos ...
     assert.equal((await request(app).get("/api/gallery")).body.meta.total, 1);
     assert.equal((await request(app).get("/api/images")).body.total_images, 1);
     assert.deepEqual((await request(app).get("/api/home")).body.data.gallery.map((p) => p.id), [people.ravi.photo]);
     assert.deepEqual((await request(app).get("/gallery-images")).body.images.map((p) => p.image_id), [people.ravi.photo]);
 
-    ({ counts } = (await list()).body.data);
-    assert.deepEqual([counts.total_on_website, counts.total_off_website], [1, 3]);
+    // ... but not the tabs' counts: they keep their minute, so moderation never makes a page view recount the scope
+    // (the page adjusts its own toggles' counts in place). The rows, and a filtered list's counts, are read fresh.
     res = await list({ display_status: "selected" });
     ({ counts } = res.body.data);
-    assert.deepEqual([counts.filter_total, counts.filter_selected, counts.filter_unselected], [1, 1, 0]);
+    assert.deepEqual([counts.total_on_website, counts.total_off_website], [0, 4]);
     assert.deepEqual(res.body.data.data.map((p) => p.photo_id), [people.ravi.photo]);
+    ({ counts } = (await list({ display_status: "selected", district_id: 26 })).body.data);
+    assert.deepEqual([counts.filter_total, counts.filter_selected, counts.filter_unselected], [1, 1, 0]);
     res = await list({ display_status: "unselected", sort: "display_last" });
-    assert.deepEqual([res.body.data.counts.filter_total, res.body.data.data.length], [3, 3]);
+    assert.equal(res.body.data.data.length, 3);
   });
 
   test("filters are counted up to the cap; search reads only indexed columns", async () => {

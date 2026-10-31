@@ -8,9 +8,11 @@ import { logger } from "./logger.js";
  *   (no stampede of identical aggregations when many requests arrive together).
  * A failed refresh keeps the stale value (and waits retryMs before trying again, instead of re-running a failing query
  * on the next request); a failed first computation rejects and is retried by the next call.
+ * A value older than maxStaleMs (a page nobody opened for a while) is not served at once: the caller waits for the
+ * refresh, so a rarely opened admin page never shows hours-old figures. If that refresh fails, the old value is served.
  * maxEntries bounds the memory (the oldest key is dropped first).
  */
-export function createCache({ ttlMs, maxEntries = 100, name = "cache", retryMs = 15_000 }) {
+export function createCache({ ttlMs, maxEntries = 100, name = "cache", retryMs = 15_000, maxStaleMs = ttlMs * 10 }) {
   const entries = new Map();
 
   function get(key, compute) {
@@ -41,7 +43,10 @@ export function createCache({ ttlMs, maxEntries = 100, name = "cache", retryMs =
       // A background refresh of a stale value reports its own failure; callers already have the old value
       if (target.at !== undefined) target.pending.catch((err) => logger.warn({ err, cache: name, key }, "Cache refresh failed"));
     }
-    return entry.at !== undefined ? Promise.resolve(entry.value) : entry.pending;
+    if (entry.at === undefined) return entry.pending;
+    if (Date.now() - entry.at < maxStaleMs) return Promise.resolve(entry.value);
+    const old = entry.value;
+    return entry.pending.then((value) => value, () => old);
   }
 
   // The cached value without ever waiting: null while nothing is cached yet (a computation starts in the background)

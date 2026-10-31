@@ -80,13 +80,12 @@ function summaryFor({ district_id, fort_id }) {
 
 /**
  * Drops what this instance shares of the website's photo set after an admin changes it (shows or hides a photo,
- * approves, rejects, deletes or restores a registration): small sets' summaries, the latest photos and the Website
- * Gallery tab counts are read fresh on the next request. Large sets keep their minute (see above).
+ * approves, rejects, deletes or restores a registration): small sets' summaries and the latest photos are read fresh
+ * on the next request. Large sets and the Website Gallery tab counts keep their minute (see above and scopeStats).
  */
 export function clearGalleryCache() {
   summaries.clear();
   latestPhotos.clear();
-  scopeStatsCache.clear();
 }
 
 // One page of the public set, newest first, at any depth. The inner query picks the page's ids off the indexes alone;
@@ -166,9 +165,11 @@ export const WEBSITE_GALLERY_MAX_PAGE = 500;
 const scopeKey = (allowedDivisionIds) => (allowedDivisionIds === null ? "all" : [...allowedDivisionIds].map(Number).sort((a, b) => a - b).join(",") || "none");
 
 // The tabs' counts of one access scope (its verified photos, on and off the website) count the whole scope, so they
-// are shared per scope for a minute, run on the report pool, and are dropped by clearGalleryCache. Two counts in one
-// statement (one snapshot), each answered from an index alone: every current main photo from the current-slot index,
-// those on the website from the small selected-photos index; the rest are off the website.
+// are shared per scope for a minute and run on the report pool. An admin's change does not drop them: approvals come
+// every few seconds, and each page view would then wait for a report connection to recount the scope (the page adjusts
+// its own toggles' counts in place). Two counts in one statement (one snapshot), each answered from an index alone:
+// every current main photo from the current-slot index, those on the website from the small selected-photos index;
+// the rest are off the website.
 function scopeStats(allowedDivisionIds) {
   return scopeStatsCache.get(scopeKey(allowedDivisionIds), async () => {
     const photos = `

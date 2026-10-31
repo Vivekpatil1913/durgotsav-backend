@@ -26,8 +26,9 @@ export function errorHandler(err, req, res, next) {
   if (err?.code === "23503") {
     return res.status(400).json({ error: { code: "INVALID_REFERENCE", message: "Referenced record does not exist" } });
   }
-  // A number or id outside its column's range (a hand-edited URL), or text where a number belongs
-  if (err?.code === "22003" || err?.code === "22P02") {
+  // A number or id outside its column's range (a hand-edited URL), text where a number belongs, or text longer than its
+  // column allows: the request's fault, not a server error
+  if (err?.code === "22003" || err?.code === "22P02" || err?.code === "22001") {
     return res.status(400).json({ error: { code: "BAD_REQUEST", message: "Invalid value in the request" } });
   }
   // Overload, not a bug: every pooled connection busy for 5 s, a statement cut off by statement_timeout, a deadlock or
