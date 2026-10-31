@@ -39,14 +39,15 @@ function spawn() {
     else task.resolve(Buffer.from(data.buffer, data.byteOffset, data.byteLength));
     dispatch();
   });
-  // A crashed or stopped thread fails only its own renders (they are retried by the queue); the next one waiting
-  // starts a replacement
+  // A crashed or stopped thread fails only its own renders; the next one waiting starts a replacement. Those renders
+  // were not at fault (the thread crashed, or hung on another render): a 503 with Retry-After, so a download is tried
+  // again and the email queue retries later, instead of a 500
   thread.worker.on("error", (err) => logger.error({ err }, "Certificate render thread crashed"));
   thread.worker.on("exit", () => {
     retire(thread);
     for (const task of thread.running.values()) {
       clearTimeout(task.timer);
-      task.reject(new Error("Certificate render thread stopped"));
+      task.reject(new AppError(503, "The certificate could not be prepared. Please try again in a minute", { code: "RENDER_FAILED" }));
     }
     thread.running.clear();
     dispatch();

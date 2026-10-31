@@ -160,27 +160,27 @@ async function unlock(client) {
 export async function retryFailed(adminId = null, { rejected = false } = {}) {
   let queued = 0;
   for (let after = 0; ;) {
-    // A job changed meanwhile (resent, re-verified) is no longer 'failed' when its row is updated, and is not counted
-    const { rows: [step] } = await query(
-      `WITH batch AS (
-         SELECT id FROM certificate_email_jobs WHERE status = 'failed' AND id > $2 ORDER BY id LIMIT ${BATCH}
-       ), requeued AS (
-         UPDATE certificate_email_jobs j
-         SET status = 'queued', reason = 'retry', requested_by = $1::int, attempts = 0, run_at = NOW(),
-             last_error_code = NULL, last_error = NULL, updated_at = NOW()
-         FROM batch
-         WHERE j.id = batch.id AND j.status = 'failed'
-           AND ($3 OR NOT EXISTS (SELECT 1 FROM certificates c JOIN registrations r ON r.id = c.registration_id
-                                  WHERE c.id = j.certificate_id AND ${REJECTED_ADDRESS}))
-         RETURNING j.id
-       )
-       SELECT (SELECT COUNT(*) FROM batch)::int AS scanned, (SELECT MAX(id) FROM batch) AS last_id,
-              (SELECT COUNT(*) FROM requeued)::int AS queued`,
-      [adminId, after, rejected],
+    // The batch's ids first, then an update by that list (as walkPending does). Joined to the update as a CTE, the
+    // planner may rescan the whole batch for every failed job when its statistics have not caught up with a burst of
+    // failures — just when this is used — and each batch then grows with all failed jobs times BATCH.
+    const { rows } = await query(
+      `SELECT id FROM certificate_email_jobs WHERE status = 'failed' AND id > $1 ORDER BY id LIMIT ${BATCH}`,
+      [after],
     );
-    queued += step.queued;
-    if (step.scanned < BATCH) break;
-    after = step.last_id;
+    if (!rows.length) break;
+    after = rows[rows.length - 1].id;
+    // A job changed meanwhile (resent, re-verified) is no longer 'failed' when its row is updated, and is not counted
+    const { rowCount } = await query(
+      `UPDATE certificate_email_jobs j
+       SET status = 'queued', reason = 'retry', requested_by = $1::int, attempts = 0, run_at = NOW(),
+           last_error_code = NULL, last_error = NULL, updated_at = NOW()
+       WHERE j.id = ANY($2::bigint[]) AND j.status = 'failed'
+         AND ($3 OR NOT EXISTS (SELECT 1 FROM certificates c JOIN registrations r ON r.id = c.registration_id
+                                WHERE c.id = j.certificate_id AND ${REJECTED_ADDRESS}))`,
+      [adminId, rows.map((r) => r.id), rejected],
+    );
+    queued += rowCount;
+    if (rows.length < BATCH) break;
   }
   statsCache.clear();
   return queued;
@@ -286,6 +286,8 @@ export async function loadForDelivery(certificateId) {
 
 // Queue health for the admin page. Counting per status reads the whole queue (seconds at millions of jobs), so it runs
 // on the report pool, once per 15 s however many admins watch (utils/cache.js); the bulk tools above clear it.
+// rejected: the failed jobs a plain "Retry failed" leaves alone (address refused and not corrected since), read from
+// the failed ones only.
 const statsCache = createCache({ ttlMs: 15_000, name: "email-queue" });
 export const queueStats = () => statsCache.get("all", countQueue);
 
@@ -297,7 +299,9 @@ async function countQueue() {
          (SELECT MIN(run_at) FROM certificate_email_jobs WHERE status = 'queued') AS next_run_at,
          (SELECT COUNT(*)::int FROM certificate_email_jobs WHERE status = 'queued' AND run_at <= NOW()) AS due_now,
          (SELECT COUNT(*)::int FROM certificate_email_log WHERE outcome = 'sent' AND created_at > NOW() - INTERVAL '1 hour') AS sent_last_hour,
-         (SELECT MAX(created_at) FROM certificate_email_log) AS last_activity_at`,
+         (SELECT MAX(created_at) FROM certificate_email_log) AS last_activity_at,
+         (SELECT COUNT(*)::int FROM certificate_email_jobs j JOIN certificates c ON c.id = j.certificate_id
+            JOIN registrations r ON r.id = c.registration_id WHERE ${REJECTED_ADDRESS}) AS rejected`,
     ),
   ]);
   const counts = { queued: 0, processing: 0, sent: 0, failed: 0, skipped: 0, cancelled: 0 };
