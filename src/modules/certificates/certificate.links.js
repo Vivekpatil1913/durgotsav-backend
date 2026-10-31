@@ -27,9 +27,6 @@ export function parseCertificateToken(token) {
 // The website page that shows one registration's status and certificate
 export const certificateLink = (registrationId) => `${env.SITE_URL}/c/${certificateToken(registrationId)}`;
 
-// Printed as a QR code on the certificate: opens the website's verification with the number filled in
-export const verifyLink = (certificateNo) => `${env.SITE_URL}/certificate?tab=verify&no=${encodeURIComponent(certificateNo)}`;
-
 // ---------------------------------------------------------------- mobile lookup session
 
 // One CAPTCHA unlocks a mobile number's list for 30 minutes: further pages are fetched with this signed, expiring

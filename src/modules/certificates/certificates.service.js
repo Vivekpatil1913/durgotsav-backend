@@ -16,7 +16,7 @@ export const CERTIFIED_STATUSES = ["verified"];
 const isValid = (c) => Boolean(c) && !c.revoked_at && CERTIFIED_STATUSES.includes(c.status);
 
 const CERT_SELECT = `
-  SELECT c.*, r.id AS registration_id, r.name, r.phone, r.email, r.status, r.created_at AS registered_at,
+  SELECT c.*, r.id AS registration_id, r.name, r.phone, r.email, r.status,
          r.deleted_at AS registration_deleted_at, d.name_mr AS district,
          p.image_path AS photo_path,
          j.status AS email_status, j.attempts AS email_attempts, j.run_at AS email_next_attempt_at,

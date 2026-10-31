@@ -2,7 +2,6 @@ import fs from "node:fs";
 import path from "node:path";
 import * as fontkit from "fontkit";
 import PDFDocument from "pdfkit";
-import QRCode from "qrcode";
 import sharp from "sharp";
 import { EDITION_YEAR } from "../../config/edition.js";
 import { paths } from "../../config/paths.js";
@@ -39,13 +38,9 @@ const TEMPLATE = {
   // after "दुर्गवीर क्र." (same baseline); free paper up to the seal at x≈495, so longer numbers only shrink past maxWidth
   durgveerNo: { x: 206, baseline: 788, size: 17, maxWidth: 150 },
   certNo: { baseline: 842, size: 11 }, // dark outer border
-  // Blank paper under the AMRUT logo and left of the gold border line (x≈1120), above the paragraph (y≈415):
-  // verification QR code, registration number and the registration's date and time (SRS v2.1 §5)
-  stamp: { cx: 1003, qrTop: 205, qrSize: 96, quiet: 4, lines: [316, 333, 348], size: 9.5, captionSize: 8.5, color: "#4A3523" },
 };
 
 const NAME_COLOR = "#3B2414";
-const QR_COLOR = "#1E140C";
 const CERT_NO_COLOR = "#E9D3A6";
 
 // Same artwork and fonts on every certificate: read once, so a render only does the participant-specific work.
@@ -69,30 +64,13 @@ function fitToLine(widthAt, { width, size, minSize, minScaling }) {
   return { size: s, scaling, width: widthAt(s, scaling) };
 }
 
-// "दिनांक: ०५/११/२०२६ · वेळ: १४:३२" in Indian time; null when the registration time is unknown
-const IST = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
-function registeredLine(value) {
-  const d = value ? new Date(value) : null;
-  if (!d || Number.isNaN(d.getTime())) return null;
-  const parts = Object.fromEntries(IST.formatToParts(d).map((p) => [p.type, p.value]));
-  return toMarathiDigits(`दिनांक: ${parts.day}/${parts.month}/${parts.year} · वेळ: ${parts.hour}:${parts.minute}`);
-}
-
 // Everything printed on the certificate besides the artwork, in one place for the PDF and the image
 function printedText(cert) {
-  const { stamp } = TEMPLATE;
   return {
     durgveer: toMarathiDigits(cert.durgveer_no),
     certNo: `Certificate No. ${cert.certificate_no}  ·  Verify at amrutdurgotsav.com/certificate`,
-    stampLines: [
-      { text: "पडताळणीसाठी QR स्कॅन करा", size: stamp.captionSize },
-      { text: `नोंदणी क्र. ${formatRegistrationNo(cert.registration_id)}`, size: stamp.size },
-      { text: registeredLine(cert.registered_at), size: stamp.size },
-    ].map((l, i) => ({ ...l, baseline: stamp.lines[i] })).filter((l) => l.text),
   };
 }
-
-const qrModules = (cert) => QRCode.create(cert.verify_url || cert.certificate_no, { errorCorrectionLevel: "M" }).modules;
 
 // The data needed for a correct certificate is missing (no photo file, no दुर्गवीर number). Retrying will not help.
 export class CertificateDataError extends Error {
@@ -167,21 +145,6 @@ function drawPage(doc, cert, photo) {
     .text(text.durgveer, t.durgveerNo.x, t.durgveerNo.baseline, { baseline: "alphabetic", lineBreak: false, fill: true, stroke: true });
   doc.restore();
 
-  // Verification QR (vector modules on a white quiet zone), registration number and date/time under the logo
-  const { stamp } = t;
-  const modules = qrModules(cert);
-  const cell = stamp.qrSize / modules.size;
-  const qrX = stamp.cx - stamp.qrSize / 2;
-  doc.save().roundedRect(qrX - stamp.quiet, stamp.qrTop - stamp.quiet, stamp.qrSize + stamp.quiet * 2, stamp.qrSize + stamp.quiet * 2, 3).fill("#FFFFFF");
-  for (let r = 0; r < modules.size; r++) {
-    for (let c = 0; c < modules.size; c++) if (modules.get(r, c)) doc.rect(qrX + c * cell, stamp.qrTop + r * cell, cell + 0.02, cell + 0.02);
-  }
-  doc.fill(QR_COLOR).restore();
-  for (const line of text.stampLines) {
-    doc.fontSize(line.size);
-    doc.fillColor(stamp.color).text(line.text, stamp.cx - doc.widthOfString(line.text) / 2, line.baseline, { baseline: "alphabetic", lineBreak: false });
-  }
-
   // Certificate number for authenticity check at /certificate (verify)
   // Printed on the dark outer border, hence the light colour. The explicit height stops pdfkit
   // from treating text this close to the page edge as overflow and starting a second page.
@@ -206,7 +169,7 @@ function pdfDocument(info) {
 const addPage = (doc) => doc.addPage({ size: [TEMPLATE.width, TEMPLATE.height], margin: 0 });
 
 /**
- * cert: { registration_id, name, photo_path, certificate_no, durgveer_no, registered_at, verify_url }
+ * cert: { registration_id, name, photo_path, certificate_no, durgveer_no }
  * requirePhoto: refuse to render without the participant's photo (emailed certificates). Downloads stay lenient.
  */
 export async function renderCertificatePdf(cert, { requirePhoto = false } = {}) {
@@ -275,16 +238,6 @@ export async function renderCertificateImage(cert, { requirePhoto = false, quali
   let numberSize = t.durgveerNo.size;
   while (numberSize > 10 && widthOf(glyphs.deva, text.durgveer, numberSize) > t.durgveerNo.maxWidth) numberSize -= 0.5;
 
-  const { stamp } = t;
-  const modules = qrModules(cert);
-  const cell = px(stamp.qrSize / modules.size);
-  const qrX = px(stamp.cx - stamp.qrSize / 2);
-  const qrY = px(stamp.qrTop);
-  let qrD = "";
-  for (let r = 0; r < modules.size; r++) {
-    for (let c = 0; c < modules.size; c++) if (modules.get(r, c)) qrD += `M${(qrX + c * cell).toFixed(2)} ${(qrY + r * cell).toFixed(2)}h${cell + 0.05}v${cell + 0.05}h-${cell + 0.05}z`;
-  }
-  const lines = text.stampLines.map((l) => `<path fill="${stamp.color}" d="${textPath(glyphs.deva, l.text, { x: stamp.cx - widthOf(glyphs.deva, l.text, l.size) / 2, baseline: l.baseline, size: l.size })}"/>`);
   const certNoWidth = widthOf(glyphs.deva, text.certNo, t.certNo.size);
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
@@ -292,9 +245,6 @@ export async function renderCertificateImage(cert, { requirePhoto = false, quali
     <path d="${nameD}" clip-path="url(#rule)" fill="${rule.paper}" stroke="${rule.paper}" stroke-width="${px(rule.gap * 2)}" stroke-linejoin="round"/>
     <path d="${nameD}" fill="${NAME_COLOR}"/>
     <path d="${textPath(glyphs.deva, text.durgveer, { x: t.durgveerNo.x, baseline: t.durgveerNo.baseline, size: numberSize })}" fill="#000" stroke="#000" stroke-width="${px(0.45)}"/>
-    <rect x="${qrX - px(stamp.quiet)}" y="${qrY - px(stamp.quiet)}" width="${px(stamp.qrSize + stamp.quiet * 2)}" height="${px(stamp.qrSize + stamp.quiet * 2)}" rx="${px(3)}" fill="#fff"/>
-    <path d="${qrD}" fill="${QR_COLOR}" shape-rendering="crispEdges"/>
-    ${lines.join("")}
     <path d="${textPath(glyphs.deva, text.certNo, { x: (t.width - certNoWidth) / 2, baseline: t.certNo.baseline, size: t.certNo.size })}" fill="${CERT_NO_COLOR}"/>
   </svg>`;
 

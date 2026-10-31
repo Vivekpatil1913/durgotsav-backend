@@ -3,7 +3,6 @@ import { Worker } from "node:worker_threads";
 import { env } from "../../config/env.js";
 import { AppError } from "../../utils/errors.js";
 import { logger } from "../../utils/logger.js";
-import { verifyLink } from "./certificate.links.js";
 import { CertificateDataError } from "./certificate.renderer.js";
 
 // Building a PDF is ~35 ms of synchronous CPU (font parsing and layout in pdfkit). Doing that on the main thread
@@ -112,12 +111,11 @@ function run(job, units) {
 }
 
 // Only these fields cross to the thread, so the renderer cannot see anything else about the participant.
-// verify_url is what the QR code on the certificate opens.
-const printable = ({ registration_id, name, photo_path, certificate_no, durgveer_no, registered_at }) =>
-  ({ registration_id, name, photo_path, certificate_no, durgveer_no, registered_at, verify_url: verifyLink(certificate_no) });
+const printable = ({ registration_id, name, photo_path, certificate_no, durgveer_no }) =>
+  ({ registration_id, name, photo_path, certificate_no, durgveer_no });
 
 /**
- * Renders on the next free thread slot. cert: { registration_id, name, photo_path, certificate_no, durgveer_no, registered_at }.
+ * Renders on the next free thread slot. cert: { registration_id, name, photo_path, certificate_no, durgveer_no }.
  * format: "pdf" (default) or "image" (2400×1712 JPEG).
  */
 export const renderInPool = (cert, { format = "pdf", ...options } = {}) =>

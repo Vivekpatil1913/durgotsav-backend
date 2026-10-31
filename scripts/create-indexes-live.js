@@ -237,6 +237,12 @@ const STEPS = [
     label: "audit_logs_admin_idx (audit log — by admin)",
     sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_logs_admin_idx ON audit_logs (admin_id, id)`,
   },
+  // mirrors migrations/038_failed_email_jobs_index.sql
+  {
+    label: "certificate_email_jobs_failed_idx (email queue — retry failed)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS certificate_email_jobs_failed_idx
+          ON certificate_email_jobs (id) WHERE status = 'failed'`,
+  },
 ];
 
 const ANALYZE = [
