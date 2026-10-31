@@ -49,15 +49,16 @@ export async function enqueueRejectionEmails(db, ids, requestedBy = null) {
 
 const BUTTON_STYLE = "display:inline-block;background:#c2641c;color:#fff;padding:10px 18px;border-radius:999px;text-decoration:none";
 
-export function rejectionEmail(r, window) {
+export function rejectionEmail(r, window, now = new Date()) {
   const regNo = formatRegistrationNo(r.id);
-  const closes = window.closesAt
+  // The admin's switch, not the closing date, closes registration: a closing date already past is left out
+  const closes = window.closesAt && new Date(window.closesAt) > now
     ? ` (नोंदणी ${new Date(window.closesAt).toLocaleDateString("mr-IN", { day: "numeric", month: "long", year: "numeric", timeZone: "Asia/Kolkata" })} पर्यंत सुरू आहे)`
     : "";
   const again = window.open
     ? `<p><b>आपण पुन्हा सहभागी होऊ शकता.</b> वरील कारण लक्षात घेऊन, आपण व आपली दुर्ग प्रतिकृती दोन्ही स्पष्ट दिसतील असे नवीन, मूळ छायाचित्र काढा आणि पुन्हा नोंदणी करा${closes}.</p>
        <p><a href="${env.SITE_URL}/participate" style="${BUTTON_STYLE}">पुन्हा नोंदणी करा</a></p>`
-    : "<p>नोंदणीचा कालावधी संपला असल्याने आता नवीन नोंदणी करता येणार नाही. अधिक माहितीसाठी कृपया आमच्याशी संपर्क साधा.</p>";
+    : "<p>सध्या नोंदणी बंद असल्याने आता नवीन नोंदणी करता येणार नाही. अधिक माहितीसाठी कृपया आमच्याशी संपर्क साधा.</p>";
   return {
     to: r.email,
     subject: `अमृत दुर्गोत्सव ${EDITION_YEAR_MR} — आपली नोंदणी ${regNo} अमान्य`,

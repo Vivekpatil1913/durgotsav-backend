@@ -50,17 +50,15 @@ export async function updateSettings(entries, adminId) {
   invalidateSettings();
 }
 
-// { open, reason: 'open'|'not_started'|'closed'|'disabled', opensAt, closesAt, forcedOpen }
-// Forced open (Admin → Settings switch or REGISTRATION_FORCE_OPEN in .env) wins over the window and the master switch.
+// { open, reason: 'open'|'not_started'|'closed', opensAt, closesAt, forcedOpen }
+// Only the Admin → Settings "Registration form" switch (registration_force_open) opens and closes the form, and
+// REGISTRATION_FORCE_OPEN=true in .env keeps it open whatever the switch says. The registration dates never open or
+// close it: the website shows them, and while the form is closed they pick the notice ("opens on …" before opens_at).
 export async function registrationWindow(now = new Date()) {
   const cfg = await getSetting("registration", {});
-  const opensAt = cfg.opens_at ? new Date(cfg.opens_at) : null;
-  const closesAt = cfg.closes_at ? new Date(cfg.closes_at) : null;
   const forcedOpen = env.REGISTRATION_FORCE_OPEN || (await getSetting("registration_force_open", false)) === true;
   const base = { opensAt: cfg.opens_at ?? null, closesAt: cfg.closes_at ?? null, forcedOpen };
   if (forcedOpen) return { ...base, open: true, reason: "open" };
-  if (cfg.enabled === false) return { ...base, open: false, reason: "disabled" };
-  if (opensAt && now < opensAt) return { ...base, open: false, reason: "not_started" };
-  if (closesAt && now > closesAt) return { ...base, open: false, reason: "closed" };
-  return { ...base, open: true, reason: "open" };
+  const notStarted = cfg.opens_at && now < new Date(cfg.opens_at);
+  return { ...base, open: false, reason: notStarted ? "not_started" : "closed" };
 }

@@ -258,27 +258,53 @@ describe("CMS", () => {
     assert.equal(bad.status, 400);
   });
 
-  test("the admin force-open switch opens a closed registration, and turning it off closes it at once", async () => {
+  test("only the Registration form switch opens and closes registration, whatever the dates say", async () => {
     const { env } = await import("../src/config/env.js");
     const put = (body) => request(app).put("/api/admin/settings").set(auth()).send(body);
-    const isOpen = async () => (await request(app).get("/api/settings")).body.data.registration_status.open;
+    const status = async () => {
+      const s = (await request(app).get("/api/settings")).body.data.registration_status;
+      return [s.open, s.reason];
+    };
     const before = (await request(app).get("/api/admin/settings").set(auth())).body.data.registration;
+    const DAY = 24 * 60 * 60 * 1000;
+    const dates = (fromDays, toDays) => ({
+      ...before,
+      opens_at: new Date(Date.now() + fromDays * DAY).toISOString(),
+      closes_at: new Date(Date.now() + toDays * DAY).toISOString(),
+    });
     env.REGISTRATION_FORCE_OPEN = false; // tests force registration open in .env; switch that off to test the admin switch alone
     try {
-      await put({ registration: { ...before, enabled: false }, registration_force_open: false });
-      assert.equal(await isOpen(), false);
-      assert.equal((await register({ phone: "9833333333" }, await makePhoto())).status, 403);
+      // Switch off while today is inside the dates (1 Nov with dates 1–30 Nov): closed, the dates do not open it
+      const off = await put({ registration: dates(-1, 29), registration_force_open: false });
+      assert.equal(off.status, 200);
+      assert.deepEqual([off.body.meta.registration_status.open, off.body.meta.registration_status.reason], [false, "closed"]);
+      assert.deepEqual(await status(), [false, "closed"]);
+      const refused = await register({ phone: "9833333333" }, await makePhoto());
+      assert.equal(refused.status, 403);
+      assert.equal(refused.body.error.code, "REGISTRATION_CLOSED");
 
+      // Switch off before the opening date: closed, and the website says when it opens
+      await put({ registration: dates(4, 29) });
+      assert.deepEqual(await status(), [false, "not_started"]);
+
+      // Switch on before the opening date: open at once
       const on = await put({ registration_force_open: true });
       assert.equal(on.status, 200);
       assert.equal(on.body.data.registration_force_open, true);
       assert.deepEqual([on.body.meta.registration_status.open, on.body.meta.registration_status.forcedOpen], [true, true]);
       assert.equal(on.body.meta.registration_force_open_env, false);
-      assert.equal(await isOpen(), true);
+      assert.deepEqual(await status(), [true, "open"]);
       assert.equal((await register({ phone: "9833333333" }, await makePhoto())).status, 201);
 
+      // Switch on after the closing date: still open. A master switch saved by an older admin console is dropped and ignored
+      const stale = await put({ registration: { ...dates(-30, -1), enabled: false } });
+      assert.equal(stale.status, 200);
+      assert.equal(stale.body.data.registration.enabled, undefined);
+      assert.deepEqual(await status(), [true, "open"]);
+
+      // Switch off: closed at once
       assert.equal((await put({ registration_force_open: false })).status, 200);
-      assert.equal(await isOpen(), false);
+      assert.deepEqual(await status(), [false, "closed"]);
 
       const pub = await request(app).get("/api/settings");
       assert.equal(pub.body.data.registration_force_open, undefined); // admin-only
@@ -288,6 +314,19 @@ describe("CMS", () => {
       env.REGISTRATION_FORCE_OPEN = true;
       await put({ registration: before, registration_force_open: false });
     }
+  });
+
+  test("the rejection email leaves out a closing date that has passed, and says plainly when registration is closed", async () => {
+    const { rejectionEmail } = await import("../src/modules/registrations/rejection-emails.js");
+    const r = { id: 10000, name: "राहुल पाटील", email: "rahul@example.com", review_note: "छायाचित्र अस्पष्ट आहे" };
+    const now = new Date("2026-12-02T10:00:00+05:30");
+    const html = (window) => rejectionEmail(r, window, now).html;
+    assert.match(html({ open: true, closesAt: "2026-12-31T23:59:59+05:30" }), /पर्यंत सुरू आहे/);
+    // The switch is still on after the closing date: invite them back without a date in the past
+    const late = html({ open: true, closesAt: "2026-11-30T23:59:59+05:30" });
+    assert.match(late, /पुन्हा नोंदणी करा/);
+    assert.doesNotMatch(late, /पर्यंत सुरू आहे/);
+    assert.match(html({ open: false, closesAt: "2026-12-31T23:59:59+05:30" }), /सध्या नोंदणी बंद/);
   });
 
   test("important dates are validated, saved and public", async () => {
