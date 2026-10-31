@@ -274,16 +274,18 @@ describe("CMS", () => {
     });
     env.REGISTRATION_FORCE_OPEN = false; // tests force registration open in .env; switch that off to test the admin switch alone
     try {
-      // Switch off while today is inside the dates (1 Nov with dates 1–30 Nov): closed, the dates do not open it
-      const off = await put({ registration: dates(-1, 29), registration_force_open: false });
+      // The live site on 1 Nov: dates 1–30 Nov saved by the old console with its master switch on, switch off → closed.
+      // Before the closing date the website says registration will begin soon, with the dates from settings.
+      await pool.query("UPDATE site_settings SET value = $1 WHERE key = 'registration'", [JSON.stringify({ ...dates(-1, 29), enabled: true })]);
+      const off = await put({ registration_force_open: false }); // the save also clears the settings cache
       assert.equal(off.status, 200);
-      assert.deepEqual([off.body.meta.registration_status.open, off.body.meta.registration_status.reason], [false, "closed"]);
-      assert.deepEqual(await status(), [false, "closed"]);
+      assert.deepEqual([off.body.meta.registration_status.open, off.body.meta.registration_status.reason], [false, "not_started"]);
+      assert.deepEqual(await status(), [false, "not_started"]);
       const refused = await register({ phone: "9833333333" }, await makePhoto());
       assert.equal(refused.status, 403);
       assert.equal(refused.body.error.code, "REGISTRATION_CLOSED");
 
-      // Switch off before the opening date: closed, and the website says when it opens
+      // Switch off before the opening date: closed, "will begin soon"
       await put({ registration: dates(4, 29) });
       assert.deepEqual(await status(), [false, "not_started"]);
 
@@ -302,7 +304,7 @@ describe("CMS", () => {
       assert.equal(stale.body.data.registration.enabled, undefined);
       assert.deepEqual(await status(), [true, "open"]);
 
-      // Switch off: closed at once
+      // Switch off after the closing date: closed at once, and the website says registration has closed
       assert.equal((await put({ registration_force_open: false })).status, 200);
       assert.deepEqual(await status(), [false, "closed"]);
 

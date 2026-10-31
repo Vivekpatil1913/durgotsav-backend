@@ -11,17 +11,20 @@ const link = z.union([z.literal(""), z.string().trim().url().max(500), z.string(
 // and its initial value (seeded once; edited later in Admin → Settings).
 // Text may say {year}: the public API fills in the edition year (config/edition.js), so it needs no yearly edits.
 export const SETTINGS = {
-  // परिशिष्ट-अ §4 dates and the notice the website shows while registration is closed. Display only: the dates do not open
-  // or close the form, registration_force_open below does. Values saved before carry `enabled` (the former master
+  // परिशिष्ट-अ §4 dates, which the website shows while the form is closed, and an optional extra notice under them in
+  // which {opens} / {closes} stand for the dates (the website fills them in). Display only: the dates do not open or
+  // close the form, registration_force_open below does. Values saved before carry `enabled` (the former master
   // switch); it is no longer read, and the schema drops it on the next save.
   registration: {
     public: true,
     schema: z.object({ opens_at: iso, closes_at: iso, note: s(500).optional() }),
     // The closing year is printed as २०२७ in the PDF — very likely meant 2026; confirm before launch.
+    // The website writes the dates itself, so the notice starts empty (migration 039 clears the earlier default that
+    // named a fixed date).
     initial: {
       opens_at: "2026-11-05T00:00:00+05:30",
       closes_at: "2027-11-25T23:59:59+05:30",
-      note: "दुर्गोत्सवासाठी ऑनलाइन नोंदणी ५ नोव्हेंबर २०२६ पासून सुरू होईल.",
+      note: "",
     },
   },
   // Admin → Settings "Registration form" switch: true shows the form on the website and accepts registrations, false

@@ -265,7 +265,7 @@ async function findBySubmission(submissionId, phone) {
  * Returned token: the participant's own status / certificate link (/c/<token>), also sent by SMS.
  */
 export async function register(input, files, meta) {
-  // A retried submission that was saved gets its registration back, even after the window has closed
+  // A retried submission that was saved gets its registration back, even after registration has closed
   if (input.submission_id) {
     const existing = await findBySubmission(input.submission_id, input.phone);
     if (existing) return existing;

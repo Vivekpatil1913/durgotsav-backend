@@ -1,11 +1,12 @@
 // Measures the API's hot endpoints under concurrency (npm run perf:bench) — run it against an API that uses a database
 // filled by scripts/perf-seed.js:
 //
-//   DB_NAME=durgotsav_2026_load NODE_ENV=test CAPTCHA_PROVIDER=off CERTIFICATE_WORKER=off PORT=4120 node src/server.js
+//   DB_NAME=durgotsav_2026_load NODE_ENV=test CAPTCHA_PROVIDER=off CERTIFICATE_WORKER=off REGISTRATION_FORCE_OPEN=true PORT=4120 node src/server.js
 //   node scripts/perf-bench.js http://localhost:4120 load@test.local LoadPassword123
 //
 // NODE_ENV=test lifts the per-IP rate limits (every request here comes from one address); CAPTCHA off lets the
-// lookups and registrations through. Prints p50 / p95 / max latency and errors per scenario.
+// lookups and registrations through, and REGISTRATION_FORCE_OPEN keeps the form open whatever the admin switch says.
+// Prints p50 / p95 / max latency and errors per scenario.
 import crypto from "node:crypto";
 import sharp from "sharp";
 

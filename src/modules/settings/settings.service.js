@@ -53,12 +53,13 @@ export async function updateSettings(entries, adminId) {
 // { open, reason: 'open'|'not_started'|'closed', opensAt, closesAt, forcedOpen }
 // Only the Admin → Settings "Registration form" switch (registration_force_open) opens and closes the form, and
 // REGISTRATION_FORCE_OPEN=true in .env keeps it open whatever the switch says. The registration dates never open or
-// close it: the website shows them, and while the form is closed they pick the notice ("opens on …" before opens_at).
+// close it; the website shows them. While the form is closed they pick its message: until closes_at "registration will
+// begin soon, <opens> to <closes>" (not_started), after it "registration closed on <closes>" (closed).
 export async function registrationWindow(now = new Date()) {
   const cfg = await getSetting("registration", {});
   const forcedOpen = env.REGISTRATION_FORCE_OPEN || (await getSetting("registration_force_open", false)) === true;
   const base = { opensAt: cfg.opens_at ?? null, closesAt: cfg.closes_at ?? null, forcedOpen };
   if (forcedOpen) return { ...base, open: true, reason: "open" };
-  const notStarted = cfg.opens_at && now < new Date(cfg.opens_at);
-  return { ...base, open: false, reason: notStarted ? "not_started" : "closed" };
+  const ended = cfg.closes_at && now > new Date(cfg.closes_at);
+  return { ...base, open: false, reason: ended ? "closed" : "not_started" };
 }

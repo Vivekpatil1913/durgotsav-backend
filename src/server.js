@@ -26,7 +26,7 @@ const server = app.listen(env.PORT, () => {
   } else {
     logger.info("CERTIFICATE_WORKER=off — certificate emails, rejection emails and SMS are sent by `npm run certificates:worker`");
   }
-  if (env.REGISTRATION_FORCE_OPEN) logger.warn("REGISTRATION_FORCE_OPEN=true — registration window in settings is ignored");
+  if (env.REGISTRATION_FORCE_OPEN) logger.warn("REGISTRATION_FORCE_OPEN=true — the registration form stays open whatever Admin → Settings → Registration form says");
   if (env.CAPTCHA_PROVIDER === "dummy" || env.CAPTCHA_PROVIDER === "off") {
     logger.warn(`CAPTCHA_PROVIDER=${env.CAPTCHA_PROVIDER} — the "I am not a robot" box is not checked by Google or Cloudflare, so it does not stop scripted submissions`);
   }

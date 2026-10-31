@@ -11,7 +11,7 @@ import { registrationWindow } from "../settings/settings.service.js";
 
 // Rejection emails: the admin's reason and a link to register again. Durable queue (table registration_emails,
 // migration 037) like SMS: a row is written in the rejection's own transaction, and a background worker sends it with
-// retries. The email is composed when it is sent, so it reflects the registration window at that time.
+// retries. The email is composed when it is sent, so it reflects whether registration is open at that time.
 // Delivery is at-least-once: a process that dies after the mail server accepted a message but before recording it sends
 // that message again once its lease expires.
 

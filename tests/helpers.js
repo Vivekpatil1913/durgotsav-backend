@@ -15,6 +15,9 @@ process.env.SEED_ADMIN_EMAIL = "admin@test.local";
 process.env.SEED_ADMIN_PASSWORD = "TestPassword123";
 process.env.SMTP_PASSWORD = ""; // never send real mail from tests
 process.env.AWARD_DOCUMENTS_DIR = path.join(os.tmpdir(), "durgotsav-award-test-documents"); // never mix test files with real evidence
+// Images the tests upload stay out of the project: uploads/ is committed, so files written there end up in commits
+process.env.UPLOADS_DIR = path.join(os.tmpdir(), "durgotsav-test-uploads");
+process.env.ORIGINALS_DIR = path.join(os.tmpdir(), "durgotsav-test-originals");
 process.env.PARTICIPANT_IMAGE_STORAGE = "local"; // never reach AWS; s3-storage.test.js switches to a fake S3
 process.env.AWARD_DOCUMENT_STORAGE = "local"; // never reach AWS; award.test.js switches to a fake S3 where it needs one
 process.env.CAPTCHA_PROVIDER = "off"; // srs-v2.test.js switches it on against a stubbed provider
