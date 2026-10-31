@@ -166,20 +166,21 @@ export const WEBSITE_GALLERY_MAX_PAGE = 500;
 const scopeKey = (allowedDivisionIds) => (allowedDivisionIds === null ? "all" : [...allowedDivisionIds].map(Number).sort((a, b) => a - b).join(",") || "none");
 
 // The tabs' counts of one access scope (its verified photos, on and off the website) count the whole scope, so they
-// are shared per scope for a minute, run on the report pool, and are dropped by clearGalleryCache.
+// are shared per scope for a minute, run on the report pool, and are dropped by clearGalleryCache. Two counts in one
+// statement (one snapshot), each answered from an index alone: every current main photo from the current-slot index,
+// those on the website from the small selected-photos index; the rest are off the website.
 function scopeStats(allowedDivisionIds) {
   return scopeStatsCache.get(scopeKey(allowedDivisionIds), async () => {
-    const scoped = allowedDivisionIds !== null;
-    const { rows } = await reportQuery(
-      `SELECT COUNT(*)::int AS total_verified,
-              COUNT(*) FILTER (WHERE p.is_featured)::int AS total_on_website,
-              COUNT(*) FILTER (WHERE NOT p.is_featured)::int AS total_off_website
-       FROM registration_photos p
-       JOIN registrations r ON r.id = p.registration_id AND r.status = 'verified' AND r.deleted_at IS NULL
-       WHERE p.is_current AND p.position = 1 ${scoped ? "AND r.division_id = ANY($1::int[])" : ""}`,
-      scoped ? [allowedDivisionIds] : [],
+    const photos = `
+      FROM registration_photos p
+      JOIN registrations r ON r.id = p.registration_id AND r.status = 'verified' AND r.deleted_at IS NULL
+      WHERE p.is_current AND p.position = 1 ${allowedDivisionIds === null ? "" : "AND r.division_id = ANY($1::int[])"}`;
+    const { rows: [counts] } = await reportQuery(
+      `SELECT (SELECT COUNT(*)::int ${photos}) AS total_verified,
+              (SELECT COUNT(*)::int ${photos} AND p.is_featured) AS total_on_website`,
+      allowedDivisionIds === null ? [] : [allowedDivisionIds],
     );
-    return rows[0];
+    return { ...counts, total_off_website: counts.total_verified - counts.total_on_website };
   });
 }
 
@@ -314,7 +315,7 @@ export async function adminListVerifiedPhotos(options, allowedDivisionIds) {
     scopeStats(allowedDivisionIds),
   ]);
 
-  // A whole tab: its counts are the scope's
+  // A filtered list was counted above; a whole tab takes the scope's counts
   const set = filtered
     ?? (display === "selected" ? { total: stats.total_on_website, selected: stats.total_on_website, capped: false }
       : display === "unselected" ? { total: stats.total_off_website, selected: 0, capped: false }
@@ -379,6 +380,6 @@ export async function setWebsiteGalleryDisplay(photoIds, featured, allowedDivisi
       [photoIds, ...scopeParams],
     ));
   }
-  clearGalleryCache();
+  if (rows.length) clearGalleryCache();
   return rows.map((r) => r.id);
 }

@@ -1,5 +1,6 @@
 import { reportQuery } from "../../db/pool.js";
 import { createCache, sortRows } from "../../utils/cache.js";
+import { STATUSES } from "../registrations/registrations.schemas.js";
 
 // ── In-process caches ────────────────────────────────────────────────────────
 // Every statistic here aggregates the whole registrations table, which is seconds of database work at millions of
@@ -71,8 +72,6 @@ function divisionFilter(alias, allowedDivisionIds) {
   return `AND ${alias}.division_id = ANY(ARRAY[${allowedDivisionIds.map(Number).join(",")}]::int[])`;
 }
 
-const STATUSES = ["pending", "info_requested", "verified", "rejected", "duplicate"];
-
 async function fetchDashboard(allowedDivisionIds) {
   const df = divisionFilter("r", allowedDivisionIds);
 
@@ -83,7 +82,7 @@ async function fetchDashboard(allowedDivisionIds) {
   const byStatus = Object.fromEntries(STATUSES.map((s) => [s, 0]));
   for (const row of statusRows) byStatus[row.status] = row.count;
 
-  // The last 30 IST days, today last: only rows created since the first day's midnight are read
+  // The last 30 IST days, today last (that bucket is "today"): only rows created since the first day's midnight are read
   const { rows: daily } = await reportQuery(`
     SELECT to_char(days.day, 'YYYY-MM-DD') AS day, COALESCE(c.count, 0)::int AS count
     FROM (SELECT ${IST_TODAY} - n AS day FROM generate_series(0, 29) AS n) days
@@ -104,10 +103,11 @@ async function fetchDashboard(allowedDivisionIds) {
     SELECT cert.certificates, cert.certificates_emailed,
       (SELECT COUNT(*)::int FROM registration_photos p JOIN registrations r ON r.id = p.registration_id
         WHERE p.is_current AND p.position = 1 AND p.duplicate_of_photo_id IS NOT NULL
-          AND r.status = 'pending' AND r.deleted_at IS NULL ${df})                      AS pending_duplicates,
+          AND r.status = 'pending' AND r.deleted_at IS NULL ${df}) AS pending_duplicates,
+      -- the photos the website shows
       (SELECT COUNT(*)::int FROM registration_photos p JOIN registrations r ON r.id = p.registration_id
         WHERE p.is_current AND p.position = 1 AND p.is_featured
-          AND r.status = 'verified' AND r.deleted_at IS NULL ${df})                     AS gallery_photos,
+          AND r.status = 'verified' AND r.deleted_at IS NULL ${df}) AS gallery_photos,
       (SELECT COUNT(*)::int FROM forts WHERE deleted_at IS NULL)                                AS forts,
       (SELECT COUNT(*)::int FROM events WHERE deleted_at IS NULL AND is_active)                 AS events,
       (SELECT COUNT(*)::int FROM videos WHERE deleted_at IS NULL AND is_active)                 AS videos,

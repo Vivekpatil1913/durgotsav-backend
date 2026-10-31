@@ -59,7 +59,7 @@ export const lookupPageLimiter = make(15, 600, "Too many pages. Try again in a f
 // Downloads through signed certificate links (cannot be guessed): a family or a school fetches many certificates, as
 // PDF and image, plus "download all" bundles, often from one shared connection
 export const downloadLimiter = make(15, 600, "Too many downloads. Try again in a few minutes");
-// Certificate verification by number (the QR code on a printed certificate): many scans at one venue share an address
+// Certificate verification by the number printed on it: many checks at one venue or office share an address
 export const verifyLimiter   = make(15, 300, "Too many verifications. Try again in a few minutes");
 export const contactLimiter  = make(60,   8, "Too many messages. Try again later");
 // Award nominations carry several files each; a real nominator submits a handful at most

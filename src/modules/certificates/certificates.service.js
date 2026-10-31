@@ -231,9 +231,11 @@ const WITH_CERTIFICATE = "EXISTS (SELECT 1 FROM certificates x WHERE x.registrat
  * The admin search box. Number (Latin or Marathi digits): the दुर्गवीर number (unique), or part of the mobile number
  * (trigram). Text: part of the certificate number or of the name (trigram); contains-search needs 3 characters.
  * Returns null when the text can match nothing, else
- * - ids: the matching certificates' registration ids, from index-backed lookups joined once (an OR across the two
- *   tables could use no index and would read every certificate). Each lookup stops at COUNT_CAP + 1 certificates, so
- *   a broad term costs no more than that — a plain UNION would first collect every match;
+ * - ids: an array of the matching certificates' registration ids, from index-backed lookups joined once (an OR across
+ *   the two tables could use no index and would read every certificate). Each lookup stops at COUNT_CAP + 1
+ *   certificates, so a broad term costs no more than that — a plain UNION would first collect every match. As an array
+ *   it is computed once, before any certificate is read, and then looked up by registration_id (UNIQUE): as an IN
+ *   (subquery) the planner may instead hash-join a scan of every certificate against it;
  * - test: the same condition on one listed row, for walking a sort index.
  */
 function search(text, params) {
@@ -258,7 +260,7 @@ function search(text, params) {
     tests.push(`c.certificate_no ILIKE ${p}`, `r.name ILIKE ${p}`);
   }
   if (!lookups.length) return null;
-  return { ids: lookups.map((sql) => `(${sql} LIMIT ${COUNT_CAP + 1})`).join(" UNION "), test: `(${tests.join(" OR ")})` };
+  return { ids: `ARRAY(${lookups.map((sql) => `(${sql} LIMIT ${COUNT_CAP + 1})`).join(" UNION ")})`, test: `(${tests.join(" OR ")})` };
 }
 
 export async function adminList(f) {
@@ -289,16 +291,16 @@ export async function adminList(f) {
     [list, count] = await Promise.all([page(filters), cappedCount(query, `${from} WHERE ${filters}`, params)]);
   } else {
     // Count first, among the certificates the lookups found. At most COUNT_CAP of them: no lookup was cut short, so
-    // the count is exact, and the page collects just those (OFFSET 0 fence) and sorts them. More: the matches are
-    // dense, so walking the sort index with the test on each row fills a page quickly, and counting stops at the cap.
+    // the count is exact, and the page reads just those and sorts them. More: the matches are dense, so walking the
+    // sort index with the test on each row fills a page quickly, and counting stops at the cap.
     const { rows: [found] } = await query(
       `SELECT COUNT(*)::int AS candidates, (COUNT(*) FILTER (WHERE ${filters}))::int AS total
-       ${from} WHERE c.registration_id IN (${terms.ids})`,
+       ${from} WHERE c.registration_id = ANY(${terms.ids})`,
       params,
     );
     if (found.candidates <= COUNT_CAP) {
       count = { total: found.total, capped: false };
-      list = await page(`${filters} AND c.registration_id IN (SELECT id FROM (${terms.ids}) found OFFSET 0)`);
+      list = await page(`${filters} AND c.registration_id = ANY(${terms.ids})`);
     } else {
       [list, count] = await Promise.all([
         page(`${filters} AND ${terms.test}`),

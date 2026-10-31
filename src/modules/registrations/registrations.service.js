@@ -11,6 +11,7 @@ import { registrationWindow } from "../settings/settings.service.js";
 import * as certificates from "../certificates/certificates.service.js";
 import { certificateLink, certificateToken } from "../certificates/certificate.links.js";
 import * as sms from "../sms/sms.queue.js";
+import { clearGalleryCache, setWebsiteGalleryDisplay } from "../gallery/gallery.service.js";
 import { enqueueRejectionEmails } from "./rejection-emails.js";
 
 const NEAR_DUPLICATE_BITS = 6;
@@ -620,7 +621,7 @@ const DUPLICATE_NOTE = "हे छायाचित्र दुसऱ्या
 
 export async function review(ids, action, note, adminId, allowedDivisionIds) {
   const status = ACTION_STATUS[action];
-  return withTransaction(async (client) => {
+  const reviewed = await withTransaction(async (client) => {
     // Lock in id order, so overlapping bulk reviews by two admins wait for each other instead of deadlocking.
     // The locked rows' current status tells which approvals are new.
     const { rows: before } = await client.query(
@@ -667,6 +668,9 @@ export async function review(ids, action, note, adminId, allowedDivisionIds) {
     }
     return changed;
   });
+  // A photo may have joined or left the public gallery (approval, rejection): its cached counts are re-read
+  clearGalleryCache();
+  return reviewed;
 }
 
 export async function update(id, fields, allowedDivisionIds) {
@@ -687,34 +691,21 @@ export async function update(id, fields, allowedDivisionIds) {
   if ("district_id" in fields) sets.push(`taluka_id = CASE WHEN district_id IS DISTINCT FROM $${keys.indexOf("district_id") + 2} THEN NULL ELSE taluka_id END`);
   const { rowCount } = await query(`UPDATE registrations SET ${sets.join(", ")} WHERE id = $1`, [id, ...keys.map((k) => values[k])]);
   if (!rowCount) throw notFound("Registration not found");
+  // The gallery is filtered by district and fort
+  if ("district_id" in fields || "fort_id" in fields) clearGalleryCache();
   return adminDetail(id, allowedDivisionIds);
 }
 
-// Shows / hides photos in the public gallery: only a live, approved registration's photo can be shown, and a scoped
-// moderator only changes photos of their own divisions.
-export async function setFeatured(photoIds, featured, allowedDivisionIds = null) {
-  if (allowedDivisionIds !== null && allowedDivisionIds.length === 0) return [];
-  const params = [photoIds, featured];
-  let scope = "";
-  if (allowedDivisionIds !== null) {
-    params.push(allowedDivisionIds);
-    scope = `AND r.division_id = ANY($${params.length}::int[])`;
-  }
-  const { rows } = await query(
-    `UPDATE registration_photos p SET is_featured = $2
-     FROM registrations r
-     WHERE p.id = ANY($1::int[]) AND r.id = p.registration_id AND p.is_current AND r.deleted_at IS NULL
-       AND ($2 = FALSE OR r.status = 'verified') ${scope}
-     RETURNING p.id`,
-    params,
-  );
-  return rows.map((r) => r.id);
-}
+// Shows / hides photos in the public gallery (the drawer's star): the same rules and locking as the Website Gallery
+// page — only a live, approved registration's photo can be shown, and a scoped moderator changes only their divisions'.
+export const setFeatured = (photoIds, featured, allowedDivisionIds = null) =>
+  setWebsiteGalleryDisplay(photoIds, featured, allowedDivisionIds);
 
 export async function softDelete(id, allowedDivisionIds) {
   await assertRegistrationScope(id, allowedDivisionIds);
   const { rowCount } = await query("UPDATE registrations SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL", [id]);
   if (!rowCount) throw notFound("Registration not found");
+  clearGalleryCache();
 }
 
 export async function restore(id, allowedDivisionIds) {
@@ -726,4 +717,5 @@ export async function restore(id, allowedDivisionIds) {
   }
   const { rowCount } = await query("UPDATE registrations SET deleted_at = NULL WHERE id = $1 AND deleted_at IS NOT NULL", [id]);
   if (!rowCount) throw notFound("Registration not found in trash");
+  clearGalleryCache();
 }

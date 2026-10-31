@@ -121,7 +121,7 @@ describe("single-page form; the certificate only after an admin approves", () =>
     const meta = await sharp(jpg.body).metadata();
     assert.deepEqual([meta.format, meta.width, meta.height], ["jpeg", 2400, 1712]);
     assert.equal((await certOf(first.id)).download_count, 2);
-    assert.equal((await request(app).get(`/api/certificates/verify/${cert.certificate_no.toLowerCase()}`)).body.data.valid, true, "QR target, any case");
+    assert.equal((await request(app).get(`/api/certificates/verify/${cert.certificate_no.toLowerCase()}`)).body.data.valid, true, "verification by number, any case");
   });
 
   test("approving again queues no second certificate, email or SMS", async () => {

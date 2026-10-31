@@ -23,8 +23,8 @@ const today = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" 
 const PDF = Buffer.from("%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n");
 
 before(async () => {
-  // Evidence goes to a folder of this run's own, so the tests can see exactly what a submission left behind.
-  // Local storage: never AWS (one test switches to an in-memory S3).
+  // Evidence goes to a folder of this run's own, so the tests see exactly what a submission leaves behind, and to the
+  // local disk: never AWS (one test switches the driver to an in-memory S3)
   docsDir = await fsp.mkdtemp(path.join(os.tmpdir(), "durgotsav-award-docs-"));
   process.env.AWARD_DOCUMENTS_DIR = docsDir;
   process.env.AWARD_DOCUMENT_STORAGE = "local";
@@ -151,12 +151,11 @@ function pdfPages(buf) {
   const text = buf.toString("latin1");
   assert.ok(text.startsWith("%PDF-"));
   const xref = Number(/startxref\s+(\d+)\s+%%EOF\s*$/.exec(text)?.[1]);
-  const [, first, count] = /^xref\s+(\d+) (\d+)\s/.exec(text.slice(xref)) ?? [];
+  const [, first, count] = (/^xref\s+(\d+) (\d+)\s/.exec(text.slice(xref)) ?? []).map(Number);
   assert.ok(count > 0, "cross-reference table");
-  const entries = text.slice(xref).split(/\r?\n/).slice(2, 2 + Number(count));
-  entries.forEach((line, i) => {
+  text.slice(xref).split(/\r?\n/).slice(2, 2 + count).forEach((line, i) => {
     const [offset, , use] = line.trim().split(" ");
-    if (use === "n") assert.ok(text.startsWith(`${Number(first) + i} 0 obj`, Number(offset)), `object ${Number(first) + i}`);
+    if (use === "n") assert.ok(text.startsWith(`${first + i} 0 obj`, Number(offset)), `object ${first + i}`);
   });
   const pages = text.match(/\/Type \/Page\b/g).length;
   assert.match(text, new RegExp(`/Type /Pages\\s+/Count ${pages}\\b`));
@@ -304,8 +303,8 @@ describe("evidence files around a submission", () => {
     { field: "doc_0", buffer: PDF, name: "report.pdf", type: "application/pdf" },
     { field: "doc_1", buffer: await makePhoto(), name: "fort.jpg", type: "image/jpeg" },
   ];
-  const withFiles = (second = "छायाचित्र", over = {}) => individual({
-    documents: [{ title: "अहवाल", file_field: "doc_0" }, { title: second, file_field: "doc_1" }], ...over,
+  const withFiles = (second = "छायाचित्र") => individual({
+    documents: [{ title: "अहवाल", file_field: "doc_0" }, { title: second, file_field: "doc_1" }],
   });
   const rowCounts = async () => (await pool.query(`SELECT
     (SELECT COUNT(*)::int FROM award_nominations) AS nominations,
@@ -579,13 +578,16 @@ describe("admin award section", () => {
 });
 
 describe("export streaming", () => {
-  test("a download sink waits for the client to drain, with one listener for the whole download", async () => {
+  test("a download sink waits for the client to drain, without adding listeners per write", async () => {
     const stream = new PassThrough({ highWaterMark: 64 }).resume(); // a client that reads
     const sink = responseSink(stream);
     const listeners = () => [stream.listenerCount("drain"), stream.listenerCount("close")];
     const before = listeners();
-    for (let i = 0; i < 50; i += 1) await sink.write(Buffer.alloc(1024));
-    assert.deepEqual(listeners(), before);
+    for (let i = 0; i < 50; i += 1) {
+      const written = sink.write(Buffer.alloc(1024)); // more than the buffer holds: settles on 'drain'
+      assert.deepEqual(listeners(), before);
+      await written;
+    }
   });
 
   test("a download sink gives up on a client that stops reading", async () => {
