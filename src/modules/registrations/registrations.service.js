@@ -425,7 +425,8 @@ export async function resubmit(registrationInput, { phone, replica_notes }, file
       );
     });
   } catch (err) {
-    if (!(photo && (await savedAfterAll("SELECT 1 FROM registration_photos WHERE image_path = $1", [photo.image_path])))) {
+    if (!(photo && (await savedAfterAll(
+      "SELECT 1 FROM registration_photos WHERE registration_id = $1 AND image_path = $2", [r.id, photo.image_path])))) {
       await discardWritten(written);
     }
     throw err;
@@ -735,9 +736,16 @@ export async function review(ids, action, note, adminId, allowedDivisionIds) {
       if (action === "reject") {
         // The participant is told why, with a link to register again: queued with the rejection, sent by the worker.
         // Rejecting again sends a new notice only when the reason changed.
+        // A notice that failed or was cancelled is sent again by rejecting again (with the same reason or a new one).
         const earlier = new Map(before.map((r) => [r.id, r]));
-        const told = (id) => earlier.get(id)?.status === "rejected" && earlier.get(id)?.review_note === (note ?? null);
-        await enqueueRejectionEmails(client, changed.filter((id) => !told(id)), adminId);
+        const sameReason = changed.filter((id) => earlier.get(id)?.status === "rejected" && earlier.get(id)?.review_note === (note ?? null));
+        const { rows: told } = await client.query(
+          `SELECT DISTINCT registration_id FROM registration_emails
+           WHERE registration_id = ANY($1::int[]) AND status IN ('queued', 'processing', 'sent')`,
+          [sameReason],
+        );
+        const toldIds = new Set(told.map((r) => r.registration_id));
+        await enqueueRejectionEmails(client, changed.filter((id) => !toldIds.has(id)), adminId);
       }
     }
     return changed;

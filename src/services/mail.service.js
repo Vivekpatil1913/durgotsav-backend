@@ -44,7 +44,7 @@ export function mailErrorKind(err) {
   const smtp = err.responseCode;
   const text = `${err.response ?? ""} ${err.message ?? ""}`;
   if (["EAUTH", "ECONNECTION", "ETIMEDOUT", "ESOCKET", "EDNS", "ETLS", "MAIL_DISABLED"].includes(err.code)
-    || smtp === 421 || smtp === 454 || /5.4.5|quota|limit exceeded|rate limit|too many/i.test(text)) {
+    || smtp === 421 || smtp === 454 || /5\.4\.5|quota|limit exceeded|rate limit|too many/i.test(text)) {
     return "transport";
   }
   if (err.code === "EENVELOPE" || (smtp >= 500 && smtp < 600)) return "recipient";

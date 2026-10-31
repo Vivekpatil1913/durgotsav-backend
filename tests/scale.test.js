@@ -300,6 +300,18 @@ describe("rejection emails go through a durable queue", () => {
     assert.equal((await rejections.drainRejectionEmails({ send: async () => { throw refused; } })).failed, 1, "a refused address fails at once");
   });
 
+  test("rejecting again with the same reason resends a notice that failed", async () => {
+    const reg = (await register({ phone: "9810000038", email: "bounced@test.local" })).body.data;
+    await review(reg.id, "reject", "कारण");
+    const refused = Object.assign(new Error("550 5.1.1 No such user"), { code: "EENVELOPE", responseCode: 550 });
+    await rejections.drainRejectionEmails({ send: async () => { throw refused; } });
+    assert.equal((await queued(reg.id))[0].status, "failed");
+    await review(reg.id, "reject", "कारण");
+    const rows = await queued(reg.id);
+    assert.deepEqual(rows.map((r) => r.status), ["failed", "queued"], "a new notice for the corrected address");
+    await rejections.drainRejectionEmails({ send: async () => ({}) });
+  });
+
   test("a refused send is retried later; email switched off keeps the notice queued", async () => {
     const reg = (await register({ phone: "9810000035", email: "flaky@test.local" })).body.data;
     await review(reg.id, "reject", "कारण");

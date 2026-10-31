@@ -5,9 +5,10 @@ import { AppError } from "../utils/errors.js";
  * Retry-After. Put it BEFORE the body parser (multer): a parked request's upload is not read until it is admitted, so
  * a spike of photo uploads cannot fill the process's memory — at most `concurrency` photos are in memory at once.
  * A request that gives up while parked (client gone) leaves the queue.
- * The slot is freed when the response has been sent, or when the client hangs up — unless the route's handler (wrapped
- * in whileAdmitted) is still working on the photo: then it is freed when that work ends, so the gate bounds the work
- * in progress, not only the open connections.
+ *
+ * gate.around(...middlewares, handler) runs the upload, its checks and the handler inside the gate as one unit: the
+ * slot is given back when that unit has finished — not when the client hangs up while its photo is still being read,
+ * checked, processed or uploaded — so the gate bounds the work in progress, not only the open connections.
  */
 export function admission({ concurrency, queue, retryAfterSeconds = 10, message }) {
   let active = 0;
@@ -31,7 +32,7 @@ export function admission({ concurrency, queue, retryAfterSeconds = 10, message 
     next();
   }
 
-  return (req, res, next) => {
+  const gate = (req, res, next) => {
     if (active < concurrency) return admit(req, res, next);
     if (waiting.length >= queue) {
       res.set("Retry-After", String(retryAfterSeconds));
@@ -50,15 +51,28 @@ export function admission({ concurrency, queue, retryAfterSeconds = 10, message 
     req.on("close", leave);
     waiting.push(entry);
   };
-}
 
-// Wraps the route handler behind admission(): its slot stays taken until the handler has finished, even when the
-// client hung up halfway (the photo is still in memory, sharp and S3 still at work).
-export const whileAdmitted = (handler) => async (req, res) => {
-  if (req.admission) req.admission.working = true;
-  try {
-    return await handler(req, res);
-  } finally {
-    req.admission?.release();
-  }
-};
+  // middlewares: Express middlewares that call next() (multer, CAPTCHA check, validation); handler: async (req, res)
+  gate.around = (...steps) => {
+    const handler = steps.pop();
+    return (req, res, next) => gate(req, res, async (refused) => {
+      if (refused) return next(refused);
+      req.admission.working = true;
+      try {
+        for (const step of steps) {
+          await new Promise((resolve, reject) => step(req, res, (err) => (err ? reject(err) : resolve())));
+        }
+        // The client is gone (its connection closed): nobody will read the answer, so the photo work is skipped.
+        // Not req.destroyed — a request reads as destroyed as soon as its body has been read.
+        if (res.destroyed || req.socket?.destroyed) return;
+        await handler(req, res);
+      } catch (err) {
+        next(err);
+      } finally {
+        req.admission.release();
+      }
+    });
+  };
+
+  return gate;
+}

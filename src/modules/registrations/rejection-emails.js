@@ -157,16 +157,19 @@ export async function processRejectionEmail(job, send = sendMail) {
       if (info !== false) pauseMs = PAUSE_MIN_MS;
     }
   } catch (err) {
-    // A refused address will not start working on its own; a mail server that is down, refuses our login or is over
-    // its quota is waited for without using up the notice's attempts; anything else is retried with back-off
+    // A refused address will not start working on its own. A mail server that is down or refuses our login is waited
+    // for without using up the notice's attempts. Other mail-server trouble (a quota answer may also be the recipient's
+    // full mailbox) pauses sending but counts as an attempt, so no notice is retried for ever; anything else backs off.
     const kind = mailErrorKind(err);
-    if (kind === "transport") {
-      pauseSending(err.code ?? err.responseCode);
+    const serverDown = ["EAUTH", "ECONNECTION", "ETIMEDOUT", "ESOCKET", "EDNS", "ETLS"].includes(err.code) || [421, 454].includes(err.responseCode);
+    if (kind === "transport") pauseSending(err.code ?? err.responseCode);
+    if (serverDown) {
       next = { status: "queued", runAt: new Date(pausedUntil), error: err.message, refund: true };
+    } else if (kind === "recipient" || job.attempts >= env.CERTIFICATE_EMAIL_MAX_ATTEMPTS) {
+      next = { status: "failed", error: err.message };
     } else {
-      next = kind === "recipient" || job.attempts >= env.CERTIFICATE_EMAIL_MAX_ATTEMPTS
-        ? { status: "failed", error: err.message }
-        : { status: "queued", runAt: retryAt(job.attempts), error: err.message };
+      const later = retryAt(job.attempts);
+      next = { status: "queued", runAt: kind === "transport" && pausedUntil > later.getTime() ? new Date(pausedUntil) : later, error: err.message };
     }
   }
   const fields = { emailId: job.id, registrationId: job.registration_id, attempt: job.attempts };
