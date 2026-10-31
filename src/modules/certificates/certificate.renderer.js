@@ -307,6 +307,8 @@ export async function renderCertificateImage(cert, { requirePhoto = false, quali
       .composite([{ input: mask, blend: "dest-in" }]).png().toBuffer();
     layers.unshift({ input: rounded, left: Math.round(px(x)), top: Math.round(px(y)) });
   }
+  // Plain libjpeg, not mozjpeg: its trellis quantisation and scan optimisation made this image ~4.6× slower to encode
+  // for only ~5 % fewer bytes, time a participant waits for on every download
   return sharp(template).resize(W, H, { fit: "fill" }).composite(layers)
-    .jpeg({ quality, chromaSubsampling: "4:4:4", mozjpeg: true }).toBuffer();
+    .jpeg({ quality, chromaSubsampling: "4:4:4", mozjpeg: false }).toBuffer();
 }

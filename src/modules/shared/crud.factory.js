@@ -7,7 +7,9 @@ import { audit } from "../../services/audit.service.js";
 import { asyncHandler, badRequest, notFound } from "../../utils/errors.js";
 import { paginate, pageMeta, paginationSchema, sortParams, sortSql } from "../../utils/pagination.js";
 
-const idParams = z.object({ id: z.coerce.number().int().positive() });
+// Ids are INTEGER columns: a larger number in a hand-edited URL is a 400, never a value SQL cannot hold
+const INT_MAX = 2_147_483_647;
+const idParams = z.object({ id: z.coerce.number().int().positive().max(INT_MAX) });
 const boolish = z.enum(["true", "false"]).transform((v) => v === "true").optional();
 
 /**
@@ -32,12 +34,14 @@ const boolish = z.enum(["true", "false"]).transform((v) => v === "true").optiona
  * @param {string[]} [cfg.roles]            roles allowed (super_admin always allowed)
  * @param {Function} [cfg.guard]            access middleware used instead of the legacy role check (e.g. checkPermission)
  * @param {(data:object)=>object|Promise<object>} [cfg.beforeSave]
+ * @param {() => void} [cfg.onChange]       called after every write (create, update, toggle, delete, restore,
+ *                                          reorder), e.g. to drop a cached public copy of the table
  */
 export function createCrud(cfg) {
   const {
     table, entity, schema, searchable = [], filters = {}, jsonFields = [], softDelete = true, hasSortOrder = true,
     order = hasSortOrder ? "sort_order ASC, id DESC" : "id DESC", roles = ["admin"], beforeSave = (d) => d,
-    actions = ["list", "get", "create", "update", "toggle", "delete", "restore", "reorder"],
+    actions = ["list", "get", "create", "update", "toggle", "delete", "restore", "reorder"], onChange = () => {},
   } = cfg;
   const updateSchema = cfg.updateSchema ?? schema.partial();
   const live = softDelete ? "deleted_at IS NULL" : "TRUE";
@@ -90,6 +94,7 @@ export function createCrud(cfg) {
         `INSERT INTO ${table} (${keys.join(", ")}) VALUES (${keys.map((_, i) => `$${i + 1}`).join(", ")}) RETURNING *`,
         keys.map((k) => data[k]),
       );
+      onChange();
       return rows[0];
     },
 
@@ -102,12 +107,14 @@ export function createCrud(cfg) {
         [id, ...keys.map((k) => data[k])],
       );
       if (!rows[0]) throw notFound(`${entity} not found`);
+      onChange();
       return rows[0];
     },
 
     async toggle(id) {
       const { rows } = await query(`UPDATE ${table} SET is_active = NOT is_active WHERE id = $1 AND ${live} RETURNING *`, [id]);
       if (!rows[0]) throw notFound(`${entity} not found`);
+      onChange();
       return rows[0];
     },
 
@@ -117,16 +124,24 @@ export function createCrud(cfg) {
         : `DELETE FROM ${table} WHERE id = $1`;
       const { rowCount } = await query(sql, [id]);
       if (!rowCount) throw notFound(`${entity} not found`);
+      onChange();
     },
 
     async restore(id) {
       const { rows } = await query(`UPDATE ${table} SET deleted_at = NULL WHERE id = $1 AND deleted_at IS NOT NULL RETURNING *`, [id]);
       if (!rows[0]) throw notFound(`${entity} not found in trash`);
+      onChange();
       return rows[0];
     },
 
+    // One statement on one connection: every new position is saved, or none is
     async reorder(items) {
-      await Promise.all(items.map(({ id, sort_order }) => query(`UPDATE ${table} SET sort_order = $2 WHERE id = $1`, [id, sort_order])));
+      await query(
+        `UPDATE ${table} t SET sort_order = v.sort_order
+         FROM unnest($1::int[], $2::int[]) AS v(id, sort_order) WHERE t.id = v.id`,
+        [items.map((i) => i.id), items.map((i) => i.sort_order)],
+      );
+      onChange();
     },
 
     // Public listing: active, not deleted
@@ -160,7 +175,7 @@ export function createCrud(cfg) {
   }
   if (can("reorder") && hasSortOrder) {
     const reorderSchema = z.object({
-      items: z.array(z.object({ id: z.number().int().positive(), sort_order: z.number().int() })).min(1).max(500),
+      items: z.array(z.object({ id: z.number().int().positive().max(INT_MAX), sort_order: z.number().int() })).min(1).max(500),
     });
     router.put("/reorder", validate({ body: reorderSchema }), asyncHandler(async (req, res) => {
       await service.reorder(req.body.items);

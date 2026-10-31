@@ -3,6 +3,7 @@ import { z } from "zod";
 import { query } from "../../db/pool.js";
 import { validate } from "../../middleware/validate.js";
 import { audit } from "../../services/audit.service.js";
+import { createCache } from "../../utils/cache.js";
 import { asyncHandler, conflict, notFound } from "../../utils/errors.js";
 import { slugify } from "../../utils/format.js";
 import { createCrud } from "../shared/crud.factory.js";
@@ -42,6 +43,10 @@ async function ensureUniqueSlug(data, id) {
   return data;
 }
 
+// The public fort list (every home page and the gallery filters) changes only when an admin edits the forts: it is
+// shared for a minute and dropped by every admin change
+const publicList = createCache({ ttlMs: 60_000, maxEntries: 1, name: "forts" });
+
 export const forts = createCrud({
   table: "forts",
   entity: "fort",
@@ -50,6 +55,7 @@ export const forts = createCrud({
   filters: { is_active: "bool", fort_type: "string" },
   jsonFields: ["facts"],
   beforeSave: ensureUniqueSlug,
+  onChange: () => publicList.clear(),
 });
 
 // ------------------------------------------------------------- fort image gallery (admin)
@@ -95,13 +101,13 @@ fortImagesRouter.delete("/:imageId", validate({ params: imageParams }), asyncHan
 const PUBLIC_COLUMNS = `f.id, f.slug, f.name_mr, f.name_en, f.location_mr, f.state, f.fort_type, f.elevation_m, f.tagline,
   f.summary, f.latitude, f.longitude, f.cover_image, f.is_unesco, f.sort_order`;
 
-export async function publicFortList() {
-  const { rows } = await query(
-    `SELECT ${PUBLIC_COLUMNS},
-            (SELECT COUNT(*)::int FROM registrations r WHERE r.fort_id = f.id AND r.status = 'verified' AND r.deleted_at IS NULL) AS replica_count
-     FROM forts f WHERE f.is_active AND f.deleted_at IS NULL ORDER BY f.sort_order, f.id`,
-  );
-  return rows;
+export function publicFortList() {
+  return publicList.get("public", async () => {
+    const { rows } = await query(
+      `SELECT ${PUBLIC_COLUMNS} FROM forts f WHERE f.is_active AND f.deleted_at IS NULL ORDER BY f.sort_order, f.id`,
+    );
+    return rows;
+  });
 }
 
 export async function publicFortBySlug(slug) {

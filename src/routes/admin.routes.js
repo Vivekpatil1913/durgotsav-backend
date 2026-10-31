@@ -296,20 +296,30 @@ cert.post("/:id/resend", validate({ params: idParams }),
     res.json({ data: { status } });
   }));
 
+// "Email pending" reads every certificate not yet emailed (minutes at millions), so it runs in the background: 202 once
+// this run holds the lock, 409 ALREADY_RUNNING while another (on any instance) goes on; audited when it has finished
 cert.post("/send-pending",
   checkPermission("certificates", "write"),
   asyncHandler(async (req, res) => {
-    const queued = await certificates.queuePending(req.admin.id);
-    audit(req, "send_pending", "certificate", null, { count: queued });
-    wakeCertificateWorker();
-    res.json({ data: { queued } });
+    const { done } = await certificates.queuePending(req.admin.id);
+    done.then(
+      (queued) => {
+        audit(req, "send_pending", "certificate", null, { count: queued });
+        wakeCertificateWorker();
+      },
+      (err) => logger.error({ err }, "Email pending stopped before it had queued every certificate"),
+    );
+    res.status(202).json({ data: { status: "started", message: "Pending certificate emails are being queued in the background and sent automatically" } });
   }));
 
+// Addresses the mail server rejected stay failed unless corrected since; include_rejected: true retries those as well
 cert.post("/retry-failed",
   checkPermission("certificates", "write"),
+  validate({ body: z.object({ include_rejected: z.boolean().optional() }) }),
   asyncHandler(async (req, res) => {
-    const queued = await certificates.retryFailed(req.admin.id);
-    audit(req, "retry_failed", "certificate", null, { count: queued });
+    const rejected = Boolean(req.body.include_rejected);
+    const queued = await certificates.retryFailed(req.admin.id, { rejected });
+    audit(req, "retry_failed", "certificate", null, { count: queued, ...(rejected && { include_rejected: true }) });
     wakeCertificateWorker();
     res.json({ data: { queued } });
   }));
@@ -338,14 +348,18 @@ router.use("/certificates", cert);
 const websiteGallery = Router();
 websiteGallery.use(scopeToAdminDivisions);
 
+// Ids within their columns (divisions / districts SMALLINT, talukas / forts / photos INTEGER), so a hand-edited URL is a
+// 400 instead of reaching SQL
+const galleryId = (max) => z.preprocess((v) => (v === "" ? undefined : v), z.coerce.number().int().positive().max(max).optional());
+const galleryPhotoId = z.coerce.number().int().positive().max(2_147_483_647);
 const websiteGalleryQuerySchema = z.object({
-  page: z.coerce.number().int().min(1).default(1),
+  page: z.coerce.number().int().min(1).max(galleryService.WEBSITE_GALLERY_MAX_PAGE).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   display_status: z.enum(["all", "selected", "unselected", "featured", "not_featured"]).default("all"),
-  division_id: z.preprocess((v) => (v === "" ? undefined : v), z.coerce.number().int().positive().optional()),
-  district_id: z.preprocess((v) => (v === "" ? undefined : v), z.coerce.number().int().positive().optional()),
-  taluka_id: z.preprocess((v) => (v === "" ? undefined : v), z.coerce.number().int().positive().optional()),
-  fort_id: z.preprocess((v) => (v === "" ? undefined : v), z.coerce.number().int().positive().optional()),
+  division_id: galleryId(32_767),
+  district_id: galleryId(32_767),
+  taluka_id: galleryId(2_147_483_647),
+  fort_id: galleryId(2_147_483_647),
   sort: z.enum(["newest", "oldest", "name", "display_first", "display_last"]).default("newest"),
   q: z.string().trim().max(100).optional(),
 });
@@ -361,7 +375,7 @@ websiteGallery.post("/toggle",
   checkPermission("website_gallery", "write"),
   validate({
     body: z.object({
-      photo_id: z.coerce.number().int().positive(),
+      photo_id: galleryPhotoId,
       featured: z.boolean(),
     }),
   }),
@@ -380,7 +394,7 @@ websiteGallery.post("/bulk",
   checkExplicitPermission("website_gallery_bulk"),
   validate({
     body: z.object({
-      photo_ids: z.array(z.coerce.number().int().positive()).min(1).max(500),
+      photo_ids: z.array(galleryPhotoId).min(1).max(500),
       featured: z.boolean(),
     }),
   }),

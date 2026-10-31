@@ -137,8 +137,14 @@ export async function storeDocument(prepared, { year, reference }, written) {
 export async function undoStored(written) {
   for (const w of written) {
     try {
-      if (w.storage === "s3") await deleteObject(w.key);
-      else await fsp.rm(path.join(paths.awardDocuments, w.key), { force: true });
+      if (w.storage === "s3") {
+        await deleteObject(w.key);
+      } else {
+        const abs = path.join(paths.awardDocuments, w.key);
+        await fsp.rm(abs, { force: true });
+        // Each attempt stores under a reference number of its own, so its folder goes too once the last file is gone
+        await fsp.rmdir(path.dirname(abs)).catch(() => {});
+      }
     } catch (err) {
       logger.error({ err, key: w.key }, "Could not remove award document after a failed submission");
     }

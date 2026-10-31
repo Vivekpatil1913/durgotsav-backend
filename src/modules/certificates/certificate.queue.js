@@ -1,4 +1,6 @@
-import { query, withTransaction } from "../../db/pool.js";
+import { pool, query, reportQuery, withTransaction } from "../../db/pool.js";
+import { createCache } from "../../utils/cache.js";
+import { conflict } from "../../utils/errors.js";
 
 // Durable queue for certificate emails (table certificate_email_jobs, migration 028). One row per certificate.
 // Writers that run inside the review transaction take its `client`, so a verified registration and its
@@ -6,6 +8,15 @@ import { query, withTransaction } from "../../db/pool.js";
 
 // Test / placeholder addresses are never emailed
 export const UNDELIVERABLE_EMAIL = /@example\.(com|net|org)$/i;
+// The worker's NO_EMAIL rule (certificate.worker.js) as SQL on the registration r: an address that is set, not blank
+// and not a placeholder. Never NULL, so NOT (…) is exactly every other registration.
+const DELIVERABLE = "r.email IS NOT NULL AND btrim(r.email) <> '' AND btrim(r.email) !~* '@example\\.(com|net|org)$'";
+
+// last_error_code prefix of a delivery the mail server refused for the address itself (worker: failure kind
+// 'recipient'), e.g. RECIPIENT_SMTP_550. Sending to that address again cannot help, so the bulk tools leave such a job
+// alone until the participant's address is corrected. As SQL on the job j and its registration r:
+export const REJECTED_PREFIX = "RECIPIENT_";
+const REJECTED_ADDRESS = "j.status = 'failed' AND j.last_error_code LIKE 'RECIPIENT\\_%' AND j.recipient = btrim(r.email)";
 
 const REQUEUE = `
   SET status = 'queued', reason = EXCLUDED.reason, requested_at = NOW(), requested_by = EXCLUDED.requested_by,
@@ -15,16 +26,27 @@ const REQUEUE = `
  * Queues the first email for these registrations' certificates. Certificates already emailed, revoked, or with a
  * delivery queued / in progress are left alone, so verifying twice (or two admins verifying at once) emails once.
  * Earlier jobs that ended failed / skipped / cancelled are queued again.
+ * A registration without a deliverable address gets its job directly as 'skipped' (NO_EMAIL), the worker's verdict:
+ * no worker round trip and no log row, and the admin list still says "No email". Returns the number queued.
  */
 export async function queueEmails(client, registrationIds, { reason = "verify", adminId = null } = {}) {
   if (!registrationIds.length) return 0;
   const { rowCount } = await client.query(
     `INSERT INTO certificate_email_jobs (certificate_id, reason, requested_by)
-     SELECT c.id, $2::varchar, $3::int FROM certificates c
-     WHERE c.registration_id = ANY($1::int[]) AND c.revoked_at IS NULL AND c.emailed_at IS NULL
+     SELECT c.id, $2::varchar, $3::int FROM certificates c JOIN registrations r ON r.id = c.registration_id
+     WHERE c.registration_id = ANY($1::int[]) AND c.revoked_at IS NULL AND c.emailed_at IS NULL AND ${DELIVERABLE}
      ORDER BY c.id
      ON CONFLICT (certificate_id) DO UPDATE ${REQUEUE}
      WHERE certificate_email_jobs.status IN ('failed', 'skipped', 'cancelled')`,
+    [registrationIds, reason, adminId],
+  );
+  // An existing job is left as it is: there is nothing to send, and it may still be in a worker's hands
+  await client.query(
+    `INSERT INTO certificate_email_jobs (certificate_id, reason, requested_by, status, last_error_code)
+     SELECT c.id, $2::varchar, $3::int, 'skipped', 'NO_EMAIL' FROM certificates c JOIN registrations r ON r.id = c.registration_id
+     WHERE c.registration_id = ANY($1::int[]) AND c.revoked_at IS NULL AND c.emailed_at IS NULL AND NOT (${DELIVERABLE})
+     ORDER BY c.id
+     ON CONFLICT (certificate_id) DO NOTHING`,
     [registrationIds, reason, adminId],
   );
   return rowCount;
@@ -60,42 +82,108 @@ export async function cancelQueued(client, registrationIds, code = "REVOKED") {
   );
 }
 
+// Rows per statement of the bulk tools below: each statement stays short, and no lock is held for long
+const BATCH = 5_000;
+const PENDING_LOCK = "certificates:queue-pending";
+
 /**
- * "Email pending": queues every valid certificate of a verified registration with an email address that has not
- * been emailed yet. Walks the certificates in id ranges so millions of rows never sit in one statement.
+ * "Email pending": queues every valid certificate of a verified registration with a deliverable address that has not
+ * been emailed yet (an address the mail server rejected only once it has been corrected). Walks the not-yet-emailed
+ * certificates in registration order through their own index (certificates_pending_email_idx), BATCH at a time.
+ * One run at a time across all instances: an advisory lock on the run's own connection, held until the walk ends; a
+ * second run is refused with 409 ALREADY_RUNNING. Resolves once the lock is held, to { done }: the number queued when
+ * the walk has finished — so the admin route can answer at once and let the walk go on in the background.
  */
-export async function queuePending(adminId = null, chunk = 20_000) {
-  const { rows } = await query("SELECT COALESCE(MIN(id), 0) AS lo, COALESCE(MAX(id), 0) AS hi FROM certificates");
+export async function queuePending(adminId = null) {
+  const client = await pool.connect();
+  let held;
+  try {
+    ({ rows: [{ held }] } = await client.query("SELECT pg_try_advisory_lock(hashtext($1)) AS held", [PENDING_LOCK]));
+  } catch (err) {
+    client.release(err);
+    throw err;
+  }
+  if (!held) {
+    client.release();
+    throw conflict("Pending certificate emails are already being queued. Please wait until that run has finished", "ALREADY_RUNNING");
+  }
+  return { done: walkPending(client, adminId).finally(() => unlock(client)) };
+}
+
+async function walkPending(client, adminId) {
   let queued = 0;
-  for (let from = rows[0].lo; from <= rows[0].hi && rows[0].hi > 0; from += chunk) {
-    const { rowCount } = await query(
+  for (let after = 0; ;) {
+    const { rows } = await client.query(
+      `SELECT registration_id FROM certificates
+       WHERE revoked_at IS NULL AND emailed_at IS NULL AND registration_id > $1
+       ORDER BY registration_id LIMIT ${BATCH}`,
+      [after],
+    );
+    if (!rows.length) break;
+    after = rows[rows.length - 1].registration_id;
+    const { rowCount } = await client.query(
       `INSERT INTO certificate_email_jobs (certificate_id, reason, requested_by)
-       SELECT c.id, 'pending', $3::int FROM certificates c
+       SELECT c.id, 'pending', $2::int FROM certificates c
        JOIN registrations r ON r.id = c.registration_id
-       WHERE c.id >= $1 AND c.id < $2
+       WHERE c.registration_id = ANY($1::int[])
          AND c.revoked_at IS NULL AND c.emailed_at IS NULL
-         AND r.status = 'verified' AND r.deleted_at IS NULL
-         AND r.email IS NOT NULL AND r.email !~* '@example\\.(com|net|org)$'
+         AND r.status = 'verified' AND r.deleted_at IS NULL AND ${DELIVERABLE}
+         AND NOT EXISTS (SELECT 1 FROM certificate_email_jobs j WHERE j.certificate_id = c.id AND ${REJECTED_ADDRESS})
        ORDER BY c.id
        ON CONFLICT (certificate_id) DO UPDATE ${REQUEUE}
        WHERE certificate_email_jobs.status IN ('failed', 'skipped', 'cancelled')`,
-      [from, from + chunk, adminId],
+      [rows.map((r) => r.registration_id), adminId],
     );
     queued += rowCount;
+    if (rows.length < BATCH) break;
   }
+  statsCache.clear();
   return queued;
 }
 
-// Gives every failed delivery a fresh set of attempts (after the cause — SMTP login, quota, a missing photo — is fixed)
-export async function retryFailed(adminId = null) {
-  const { rowCount } = await query(
-    `UPDATE certificate_email_jobs
-     SET status = 'queued', reason = 'retry', requested_by = $1::int, attempts = 0, run_at = NOW(),
-         last_error_code = NULL, last_error = NULL, updated_at = NOW()
-     WHERE status = 'failed'`,
-    [adminId],
-  );
-  return rowCount;
+async function unlock(client) {
+  try {
+    await client.query("SELECT pg_advisory_unlock(hashtext($1))", [PENDING_LOCK]);
+    client.release();
+  } catch (err) {
+    // Discarding the connection ends its session, which releases the lock as well
+    client.release(err);
+  }
+}
+
+/**
+ * "Retry failed": gives failed deliveries a fresh set of attempts (after the cause — SMTP login, quota, a missing
+ * photo — is fixed), BATCH jobs per statement in id order. An address the mail server rejected is left out unless it
+ * has been corrected since, or `rejected` asks for those too (e.g. after a policy block on the sender was lifted).
+ * Returns the number queued again.
+ */
+export async function retryFailed(adminId = null, { rejected = false } = {}) {
+  let queued = 0;
+  for (let after = 0; ;) {
+    // A job changed meanwhile (resent, re-verified) is no longer 'failed' when its row is updated, and is not counted
+    const { rows: [step] } = await query(
+      `WITH batch AS (
+         SELECT id FROM certificate_email_jobs WHERE status = 'failed' AND id > $2 ORDER BY id LIMIT ${BATCH}
+       ), requeued AS (
+         UPDATE certificate_email_jobs j
+         SET status = 'queued', reason = 'retry', requested_by = $1::int, attempts = 0, run_at = NOW(),
+             last_error_code = NULL, last_error = NULL, updated_at = NOW()
+         FROM batch
+         WHERE j.id = batch.id AND j.status = 'failed'
+           AND ($3 OR NOT EXISTS (SELECT 1 FROM certificates c JOIN registrations r ON r.id = c.registration_id
+                                  WHERE c.id = j.certificate_id AND ${REJECTED_ADDRESS}))
+         RETURNING j.id
+       )
+       SELECT (SELECT COUNT(*) FROM batch)::int AS scanned, (SELECT MAX(id) FROM batch) AS last_id,
+              (SELECT COUNT(*) FROM requeued)::int AS queued`,
+      [adminId, after, rejected],
+    );
+    queued += step.queued;
+    if (step.scanned < BATCH) break;
+    after = step.last_id;
+  }
+  statsCache.clear();
+  return queued;
 }
 
 // ---------------------------------------------------------------- worker side
@@ -130,6 +218,11 @@ const clip = (v, n) => (v == null ? null : n ? String(v).slice(0, n) : v);
  */
 export async function finishJob(job, worker, next, log) {
   return withTransaction(async (client) => {
+    // The email left: record it on the certificate even if the lease was lost, so no one sends it again. Written first,
+    // so this transaction locks the certificate before its job, as review, regenerate and reinstate do (no deadlock)
+    if (next.delivered) {
+      await client.query("UPDATE certificates SET emailed_at = NOW() WHERE id = $1", [job.certificate_id]);
+    }
     const { rowCount } = await client.query(
       `UPDATE certificate_email_jobs
        SET status = $3, run_at = COALESCE($4, run_at), attempts = attempts - $5::int,
@@ -142,10 +235,6 @@ export async function finishJob(job, worker, next, log) {
       [job.id, worker, next.status, next.runAt ?? null, next.refund ? 1 : 0, clip(log.recipient, 160),
         clip(log.error_code, 40), clip(log.error, 500), Boolean(next.delivered)],
     );
-    // The email left: record it on the certificate even if the lease was lost, so no one sends it again
-    if (next.delivered) {
-      await client.query("UPDATE certificates SET emailed_at = NOW() WHERE id = $1", [job.certificate_id]);
-    }
     const columns = Object.keys(LOG_COLUMNS);
     const values = columns.map((c) => clip(log[c], LOG_COLUMNS[c]));
     await client.query(
@@ -195,10 +284,15 @@ export async function loadForDelivery(certificateId) {
 
 // ---------------------------------------------------------------- admin
 
-export async function queueStats() {
+// Queue health for the admin page. Counting per status reads the whole queue (seconds at millions of jobs), so it runs
+// on the report pool, once per 15 s however many admins watch (utils/cache.js); the bulk tools above clear it.
+const statsCache = createCache({ ttlMs: 15_000, name: "email-queue" });
+export const queueStats = () => statsCache.get("all", countQueue);
+
+async function countQueue() {
   const [byStatus, timing] = await Promise.all([
-    query("SELECT status, COUNT(*)::int AS count FROM certificate_email_jobs GROUP BY status"),
-    query(
+    reportQuery("SELECT status, COUNT(*)::int AS count FROM certificate_email_jobs GROUP BY status"),
+    reportQuery(
       `SELECT
          (SELECT MIN(run_at) FROM certificate_email_jobs WHERE status = 'queued') AS next_run_at,
          (SELECT COUNT(*)::int FROM certificate_email_jobs WHERE status = 'queued' AND run_at <= NOW()) AS due_now,

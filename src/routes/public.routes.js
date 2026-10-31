@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { query } from "../db/pool.js";
 import { admission } from "../middleware/admission.js";
+import { cache } from "../middleware/cache.js";
 import {
   contactLimiter, downloadLimiter, lookupLimiter, lookupPageLimiter, registerLimiter, verifyLimiter, visitLimiter,
 } from "../middleware/rateLimit.js";
@@ -29,14 +30,15 @@ import { publicFortBySlug, publicFortList } from "../modules/forts/forts.module.
 import { announcements, events, faqs, podcasts, testimonials, videos } from "../modules/content/content.resources.js";
 
 const router = Router();
-const optionalId = z.preprocess((v) => (v === "" ? undefined : v), z.coerce.number().int().positive().optional());
-const pageQuery = z.object({ page: z.coerce.number().int().min(1).default(1), district_id: optionalId, fort_id: optionalId });
-
-// Short CDN/browser caching for public read endpoints that change slowly
-const cache = (seconds) => (req, res, next) => {
-  res.set("Cache-Control", `public, max-age=${seconds}, stale-while-revalidate=${seconds * 4}`);
-  next();
-};
+// Pages and ids within what their columns hold (districts.id SMALLINT, forts.id INTEGER), so a hand-edited URL is a
+// 400 instead of reaching SQL
+const MAX_PAGE = 100_000;
+const optionalId = (max) => z.preprocess((v) => (v === "" ? undefined : v), z.coerce.number().int().positive().max(max).optional());
+const pageQuery = z.object({
+  page: z.coerce.number().int().min(1).max(MAX_PAGE).default(1),
+  district_id: optionalId(32_767),
+  fort_id: optionalId(2_147_483_647),
+});
 
 router.get("/health", asyncHandler(async (req, res) => {
   await query("SELECT 1");
@@ -84,17 +86,21 @@ router.post("/visits", visitLimiter, validate({ body: visitSchema }), asyncHandl
 }));
 
 router.get("/home", cache(60), asyncHandler(async (req, res) => {
-  // One round-trip for the home page
-  const [settings, counters, forts, timeline, voices, news, featured] = await Promise.all([
-    getPublicSettings(),
-    stats.publicStats(),
+  // One round-trip for what the home page renders. Each part stands alone: one that fails is sent empty, and the
+  // response is then not cached, instead of failing the page. The counters never hold it up: they come from the
+  // cache, null until first computed (the site then shows its fixed figures).
+  const parts = await Promise.allSettled([
     publicFortList(),
-    events.service.listPublic(),
     testimonials.service.listPublic(),
-    announcements.service.listPublic({ limit: 6, extraWhere: "AND published_at <= NOW()" }),
-    galleryService.gallery({ page: 1, limit: 12 }),
+    galleryService.latest(12),
   ]);
-  res.json({ data: { settings, stats: counters, forts, events: timeline, testimonials: voices, announcements: news, gallery: featured.data } });
+  const [forts, voices, featured] = parts.map((part) => (part.status === "fulfilled" ? part.value : []));
+  const failed = parts.filter((part) => part.status === "rejected");
+  if (failed.length) {
+    res.set("Cache-Control", "no-store");
+    for (const { reason } of failed) logger.error({ err: reason }, "Home page section failed");
+  }
+  res.json({ data: { stats: stats.cachedPublicStats(), forts, testimonials: voices, gallery: featured } });
 }));
 
 router.get("/forts", cache(120), asyncHandler(async (req, res) => res.json({ data: await publicFortList() })));
@@ -104,7 +110,11 @@ router.get("/forts/:slug", cache(120), validate({ params: z.object({ slug: z.str
 router.get("/events", cache(120), asyncHandler(async (req, res) => res.json({ data: await events.service.listPublic() })));
 router.get("/videos", cache(120), asyncHandler(async (req, res) => res.json({ data: await videos.service.listPublic() })));
 // GET /api/podcasts?page=N&limit=M — paged so the playlist can grow without bound; the site fetches more as the list scrolls
-router.get("/podcasts", cache(120), validate({ query: paginationSchema.extend({ limit: z.coerce.number().int().min(1).max(50).default(10) }) }),
+const podcastQuery = paginationSchema.extend({
+  page: z.coerce.number().int().min(1).max(MAX_PAGE).default(1),
+  limit: z.coerce.number().int().min(1).max(50).default(10),
+});
+router.get("/podcasts", cache(120), validate({ query: podcastQuery }),
   asyncHandler(async (req, res) => res.json(await podcasts.service.pagePublic({ ...req.query, columns: "id, youtube_id, title_mr, title_en" }))));
 router.get("/testimonials", cache(300), asyncHandler(async (req, res) => res.json({ data: await testimonials.service.listPublic() })));
 router.get("/faqs", cache(300), asyncHandler(async (req, res) => res.json({ data: await faqs.service.listPublic() })));

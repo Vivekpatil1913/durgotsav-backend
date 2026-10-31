@@ -2,7 +2,7 @@ import { query, withTransaction } from "../../db/pool.js";
 import { conflict, notFound } from "../../utils/errors.js";
 import { formatCertificateNo, formatRegistrationNo, latinDigits, likeContains, parseRegistrationNo } from "../../utils/format.js";
 import { logger } from "../../utils/logger.js";
-import { paginate, pageMeta, sortSql } from "../../utils/pagination.js";
+import { assertBrowsable, cappedCount, cappedMeta, COUNT_CAP, paginate, sortSql } from "../../utils/pagination.js";
 import { certificateToken, parseCertificateToken } from "./certificate.links.js";
 import { renderBundleInPool, renderInPool } from "./certificate.render-pool.js";
 import { CertificateDataError } from "./certificate.renderer.js";
@@ -73,16 +73,23 @@ async function findValid(registrationId) {
   return rows[0] ?? null;
 }
 
+// Counted once the file is ready: a refused (BUSY) or failed render is no download. The counter is not worth failing a
+// participant's download over, so a write that fails (database busy) is only logged.
 const countDownloads = (certificateIds) =>
-  query("UPDATE certificates SET download_count = download_count + 1, last_downloaded_at = NOW() WHERE id = ANY($1::int[])", [certificateIds]);
+  query("UPDATE certificates SET download_count = download_count + 1, last_downloaded_at = NOW() WHERE id = ANY($1::int[])", [certificateIds])
+    .catch((err) => logger.warn({ err, certificateIds }, "Certificate download not counted"));
 
 export async function renderPdf(cert) {
   if (!cert.photo_path) logger.warn({ registrationId: cert.registration_id }, "Certificate rendered without a photo (none on record)");
   return renderInPool(cert);
 }
 
-// format: "pdf" | "jpg" (2400×1712 JPEG)
-export const render = (cert, format = "pdf") => (format === "jpg" ? renderInPool(cert, { format: "image" }) : renderPdf(cert));
+// A participant's download (getForDownload / downloadByToken), counted once rendered. format: "pdf" | "jpg" (2400×1712 JPEG)
+export async function render(cert, format = "pdf") {
+  const file = format === "jpg" ? await renderInPool(cert, { format: "image" }) : await renderPdf(cert);
+  await countDownloads([cert.id]);
+  return file;
+}
 
 // ---------------------------------------------------------------- public
 
@@ -93,6 +100,7 @@ function unavailable(status) {
     : conflict("This certificate is not available. The registration was not approved.", "NOT_AVAILABLE");
 }
 
+// The certificate to download (render() renders it and counts the download)
 export async function getForDownload(registrationInput, phone) {
   const id = parseRegistrationNo(registrationInput);
   if (!id) throw notFound("No registration found for this registration number and mobile number");
@@ -100,7 +108,6 @@ export async function getForDownload(registrationInput, phone) {
   if (!rows[0]) throw notFound("No registration found for this registration number and mobile number");
   const cert = await findValid(id);
   if (!isValid(cert)) throw unavailable(rows[0].status);
-  await countDownloads([cert.id]);
   return cert;
 }
 
@@ -139,6 +146,7 @@ export async function linkSummary(token) {
   return publicView(rows[0]);
 }
 
+// The certificate behind a participant link (render() renders it and counts the download)
 export async function downloadByToken(token) {
   const id = parseCertificateToken(token);
   const cert = id && (await findValid(id));
@@ -147,7 +155,6 @@ export async function downloadByToken(token) {
     if (!rows[0]) throw notFound("This certificate link is not valid");
     throw unavailable(rows[0].status);
   }
-  await countDownloads([cert.id]);
   return cert;
 }
 
@@ -162,8 +169,9 @@ export async function bundleByTokens(tokens) {
     : { rows: [] };
   const certs = rows.filter(isValid);
   if (!certs.length) throw notFound("No downloadable certificate among these links");
+  const pdf = await renderBundleInPool(certs);
   await countDownloads(certs.map((c) => c.id));
-  return { certs, pdf: await renderBundleInPool(certs) };
+  return { certs, pdf };
 }
 
 /**
@@ -208,15 +216,53 @@ export async function verifyPublic(certificateNo) {
 
 // ---------------------------------------------------------------- admin
 
-// Admin list orders by column: certificate_no and durgveer_no are unique, issued_at and r.name are indexed
+// Admin list orders by column, each read off an index: issued_at, the certificate number by the registration it is
+// made from (AMRUT-DGT26-<registration>: as text, 1000000 would sort before 999999), durgveer_no (unique), r.name
 export const ADMIN_SORTS = {
   issued_at: { cols: "c.issued_at, c.id", dir: "desc" },
-  certificate_no: { cols: "c.certificate_no", dir: "asc" },
+  certificate_no: { cols: "c.registration_id", dir: "asc" },
   durgveer_no: { cols: "c.durgveer_no", dir: "asc" },
   name: { cols: "r.name, c.id", dir: "asc" },
 };
 
+const WITH_CERTIFICATE = "EXISTS (SELECT 1 FROM certificates x WHERE x.registration_id = r.id)";
+
+/**
+ * The admin search box. Number (Latin or Marathi digits): the दुर्गवीर number (unique), or part of the mobile number
+ * (trigram). Text: part of the certificate number or of the name (trigram); contains-search needs 3 characters.
+ * Returns null when the text can match nothing, else
+ * - ids: the matching certificates' registration ids, from index-backed lookups joined once (an OR across the two
+ *   tables could use no index and would read every certificate). Each lookup stops at COUNT_CAP + 1 certificates, so
+ *   a broad term costs no more than that — a plain UNION would first collect every match;
+ * - test: the same condition on one listed row, for walking a sort index.
+ */
+function search(text, params) {
+  const q = latinDigits(text);
+  const lookups = [];
+  const tests = [];
+  if (/^\d+$/.test(q)) {
+    if (q.length <= 9) {
+      lookups.push(`SELECT registration_id AS id FROM certificates WHERE durgveer_no = ${Number(q)}`);
+      tests.push(`c.durgveer_no = ${Number(q)}`);
+    }
+    if (q.length >= 3) {
+      params.push(likeContains(q));
+      lookups.push(`SELECT r.id FROM registrations r WHERE r.phone LIKE $${params.length} AND r.deleted_at IS NULL AND ${WITH_CERTIFICATE}`);
+      tests.push(`r.phone LIKE $${params.length}`);
+    }
+  } else if (q.length >= 3) {
+    params.push(likeContains(q));
+    const p = `$${params.length}`;
+    lookups.push(`SELECT registration_id AS id FROM certificates WHERE certificate_no ILIKE ${p}`);
+    lookups.push(`SELECT r.id FROM registrations r WHERE r.name ILIKE ${p} AND r.deleted_at IS NULL AND ${WITH_CERTIFICATE}`);
+    tests.push(`c.certificate_no ILIKE ${p}`, `r.name ILIKE ${p}`);
+  }
+  if (!lookups.length) return null;
+  return { ids: lookups.map((sql) => `(${sql} LIMIT ${COUNT_CAP + 1})`).join(" UNION "), test: `(${tests.join(" OR ")})` };
+}
+
 export async function adminList(f) {
+  assertBrowsable(f, "certificates");
   const where = ["r.deleted_at IS NULL"];
   const params = [];
   if (f.state === "valid") where.push("c.revoked_at IS NULL");
@@ -228,39 +274,41 @@ export async function adminList(f) {
     params.push(f.email_status);
     where.push(`j.status = $${params.length}`);
   }
-  if (f.q) {
-    // The matching registrations come from index-backed lookups, joined once: an OR across two tables (name on
-    // registrations, number on certificates) could use no index and would read every certificate.
-    //   number (Latin or Marathi digits): the दुर्गवीर number (unique), or part of the mobile number (trigram)
-    //   text: part of the certificate number or of the name (trigram); contains-search needs 3 characters
-    const q = latinDigits(f.q);
-    const lookups = [];
-    if (/^\d+$/.test(q)) {
-      if (q.length <= 9) lookups.push(`SELECT registration_id FROM certificates WHERE durgveer_no = ${Number(q)}`);
-      if (q.length >= 3) {
-        params.push(likeContains(q));
-        lookups.push(`SELECT id FROM registrations WHERE phone LIKE $${params.length} AND deleted_at IS NULL`);
-      }
-    } else if (q.length >= 3) {
-      params.push(likeContains(q));
-      lookups.push(`SELECT registration_id FROM certificates WHERE certificate_no ILIKE $${params.length}`);
-      lookups.push(`SELECT id FROM registrations WHERE name ILIKE $${params.length} AND deleted_at IS NULL`);
-    }
-    where.push(lookups.length ? `c.registration_id IN (${lookups.join(" UNION ")})` : "FALSE");
-  }
+  const terms = f.q ? search(f.q, params) : null;
+  if (f.q && !terms) where.push("FALSE");
+  const filters = where.join(" AND ");
+  // Counting joins the email job only when a filter reads it
+  const from = `FROM certificates c JOIN registrations r ON r.id = c.registration_id${f.email_status ? " LEFT JOIN certificate_email_jobs j ON j.certificate_id = c.id" : ""}`;
   const { limit, offset } = paginate(f);
-  const sqlWhere = `WHERE ${where.join(" AND ")}`;
-  const [list, count] = await Promise.all([
-    query(`${CERT_SELECT} ${sqlWhere} ORDER BY ${sortSql(ADMIN_SORTS, f, "issued_at")} LIMIT ${limit} OFFSET ${offset}`, params),
-    query(
-      `SELECT COUNT(*)::int AS total FROM certificates c JOIN registrations r ON r.id = c.registration_id
-       LEFT JOIN certificate_email_jobs j ON j.certificate_id = c.id ${sqlWhere}`,
+  const page = (condition) =>
+    query(`${CERT_SELECT} WHERE ${condition} ORDER BY ${sortSql(ADMIN_SORTS, f, "issued_at")} LIMIT ${limit} OFFSET ${offset}`, params);
+
+  let list;
+  let count;
+  if (!terms) {
+    [list, count] = await Promise.all([page(filters), cappedCount(query, `${from} WHERE ${filters}`, params)]);
+  } else {
+    // Count first, among the certificates the lookups found. At most COUNT_CAP of them: no lookup was cut short, so
+    // the count is exact, and the page collects just those (OFFSET 0 fence) and sorts them. More: the matches are
+    // dense, so walking the sort index with the test on each row fills a page quickly, and counting stops at the cap.
+    const { rows: [found] } = await query(
+      `SELECT COUNT(*)::int AS candidates, (COUNT(*) FILTER (WHERE ${filters}))::int AS total
+       ${from} WHERE c.registration_id IN (${terms.ids})`,
       params,
-    ),
-  ]);
+    );
+    if (found.candidates <= COUNT_CAP) {
+      count = { total: found.total, capped: false };
+      list = await page(`${filters} AND c.registration_id IN (SELECT id FROM (${terms.ids}) found OFFSET 0)`);
+    } else {
+      [list, count] = await Promise.all([
+        page(`${filters} AND ${terms.test}`),
+        found.total > COUNT_CAP ? { total: COUNT_CAP, capped: true } : cappedCount(query, `${from} WHERE ${filters} AND ${terms.test}`, params),
+      ]);
+    }
+  }
   return {
     data: list.rows.map(({ phone, ...c }) => ({ ...c, phone, registration_no: formatRegistrationNo(c.registration_id) })),
-    meta: pageMeta(f, count.rows[0].total),
+    meta: cappedMeta(f, count),
   };
 }
 
@@ -332,8 +380,9 @@ export async function resend(registrationId, adminId) {
   return emailQueue.queueResend(registrationId, adminId);
 }
 
+// Resolves to { done } once this run holds the lock (409 ALREADY_RUNNING while another run goes on); see the queue
 export const queuePending = (adminId) => emailQueue.queuePending(adminId);
-export const retryFailed = (adminId) => emailQueue.retryFailed(adminId);
+export const retryFailed = (adminId, options) => emailQueue.retryFailed(adminId, options);
 export const emailQueueStats = () => emailQueue.queueStats();
 
 export async function deliveryLog(registrationId) {

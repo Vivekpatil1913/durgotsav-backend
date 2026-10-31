@@ -7,7 +7,7 @@ import { emailLayout, escapeHtml, sendMail } from "../../services/mail.service.j
 import { formatRegistrationNo, toMarathiDigits } from "../../utils/format.js";
 import { logger } from "../../utils/logger.js";
 import { certificateLink } from "./certificate.links.js";
-import { claimDue, finishJob, loadForDelivery, reapExpiredLeases, UNDELIVERABLE_EMAIL } from "./certificate.queue.js";
+import { claimDue, finishJob, loadForDelivery, reapExpiredLeases, REJECTED_PREFIX, UNDELIVERABLE_EMAIL } from "./certificate.queue.js";
 import { renderInPool } from "./certificate.render-pool.js";
 import { CertificateDataError } from "./certificate.renderer.js";
 import { CERTIFIED_STATUSES } from "./certificates.service.js";
@@ -151,7 +151,9 @@ function failure(job, err) {
   const next = final
     ? { status: "failed" }
     : { status: "queued", runAt: new Date(Date.now() + (refund ? PAUSE_MAX_MS : retryDelayMs(job.attempts))), refund };
-  return { next, outcome: final ? "failed" : "retry", code, error: err.message, smtp_response: err.response };
+  // A rejected address is marked as such (RECIPIENT_SMTP_550 …): "Retry failed" and "Email pending" skip it until corrected
+  const recorded = kind === "recipient" ? `${REJECTED_PREFIX}${code}` : code;
+  return { next, outcome: final ? "failed" : "retry", code: recorded, error: err.message, smtp_response: err.response };
 }
 
 // Saving the result must not be lost after an email went out (it would be sent again), so retry the write a few times
