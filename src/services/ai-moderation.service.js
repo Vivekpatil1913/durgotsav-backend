@@ -30,14 +30,19 @@ The image MUST show a handmade replica of a traditional Maratha or Indian HILLFO
   - Typical hilltop fort layout
 hasFort = true ONLY if it is clearly a FORT (किल्ला). 
 
-❌ REJECT IMMEDIATELY (hasFort = false) if the image shows ANY of these — even if handmade:
-  - Mosque / Masjid (मशीद) — identifiable by domes (घुमट), minarets (मिनार), arched entrances
-  - Temple (मंदिर)
-  - Taj Mahal replica
-  - Church or any other religious building
-  - Modern building or random construction
-  - Garden decoration or water fountain / pond feature
-  - Any structure that is NOT clearly a traditional fort
+❌ REJECT IMMEDIATELY (hasFort = false, isFortSpecifically = false) if the image shows ANY of these:
+  - Mosque / Masjid (मशीद) — domes (घुमट), minarets (मिनार), arched entrances
+  - Temple (मंदिर) or any religious building
+  - Taj Mahal or other monument replica
+  - Church, palace, or modern building
+  - Garden decoration, water fountain, or pond feature
+  - Road, street, footpath, vehicle, or outdoor scene
+  - Selfie or portrait (person only, no fort)
+  - Animals, birds, food, plants, trees, or nature photos
+  - Sky, sunset, landscape, or travel photos
+  - Screenshot, meme, cartoon, drawing, or printed photo
+  - Random objects: books, toys, bags, household items
+  - Any image where the MAIN subject is NOT a traditional Maratha hillfort replica
 
 RULE 2 — PARTICIPANT PRESENT:
 A real person (child or adult) must be clearly visible in the photo standing with the fort replica.
