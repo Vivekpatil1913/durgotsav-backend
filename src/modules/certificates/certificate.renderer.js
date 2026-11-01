@@ -32,7 +32,9 @@ const TEMPLATE = {
     x: 318, width: 398, baseline: 547, size: 23.3, minSize: 16.5, minScaling: 80,
     rule: { top: 548.5, height: 3.5, paper: "#ECE8E3", gap: 1.3 },
   },
-  photo: { x: 124, y: 670.5, width: 161, height: 77, radius: 6 }, // empty area above "मी आणि माझा दुर्ग"
+  photo: { x: 100, y: 668, width: 210, height: 80, radius: 6 }, // empty area above "मी आणि माझा दुर्ग"
+
+
   // after "दुर्गवीर क्र." (same baseline); free paper up to the seal at x≈495, so longer numbers only shrink past maxWidth
   durgveerNo: { x: 206, baseline: 788, size: 17, maxWidth: 150 },
   certNo: { baseline: 842 }, // dark outer border
@@ -73,7 +75,10 @@ export async function renderCertificatePdf(cert, { requirePhoto = false } = {}) 
   }
   const t = TEMPLATE;
   const { template, font, nameFont } = loadAssets();
-  const photo = await loadAsJpeg(photoPath, t.photo.width * 3, t.photo.height * 3, "attention");
+  // Load photo: use 'inside' fit so the full photo is loaded without any cropping.
+  // The renderer scales/positions it to fit the certificate box correctly.
+  const photo = await loadAsJpeg(photoPath, t.photo.width * 3, t.photo.height * 3, "top");
+
   if (!photo && requirePhoto) {
     throw new CertificateDataError("PHOTO_MISSING", `Photo of registration ${id} could not be read (${photoPath ?? "none on record"})`);
   }
@@ -122,7 +127,22 @@ export async function renderCertificatePdf(cert, { requirePhoto = false } = {}) 
     if (photo) {
       const { x, y, width, height, radius } = t.photo;
       doc.save().roundedRect(x, y, width, height, radius).clip();
-      doc.image(photo, x, y, { width, height });
+      // Fit the photo into the box: scale down so the full height fits (contain on height),
+      // then centre horizontally — this keeps the person visible without cropping the top.
+      const imgInfo = doc.openImage(photo);
+      const imgW = imgInfo.width;
+      const imgH = imgInfo.height;
+      // Scale to fit height of box, then check if width fits too
+      let drawW = (imgW / imgH) * height;
+      let drawH = height;
+      if (drawW > width) {
+        // Image is too wide even when fitted to height — fit to width instead
+        drawH = (imgH / imgW) * width;
+        drawW = width;
+      }
+      const drawX = x + (width - drawW) / 2;
+      const drawY = y + (height - drawH) / 2;
+      doc.image(photo, drawX, drawY, { width: drawW, height: drawH });
       doc.restore();
     }
 

@@ -148,7 +148,8 @@ export async function loadAsJpeg(publicPath, size = 240, height = size, position
   const file = path.join(paths.uploads, publicPath.slice("/uploads/".length));
   if (!file.startsWith(paths.uploads)) return null; // no path traversal
   try {
-    return await sharp(file).resize(size, height, { fit: "cover", position }).jpeg({ quality: 85 }).toBuffer();
+    return await sharp(file).resize(size, height, { fit: "inside", withoutEnlargement: true }).jpeg({ quality: 85 }).toBuffer();
+
   } catch {
     return null;
   }
