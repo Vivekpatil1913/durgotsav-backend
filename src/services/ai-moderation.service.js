@@ -17,47 +17,45 @@ export async function verifyParticipantPhotoWithAI(imageBuffer) {
 
   const base64Image = jpegBuffer.toString("base64");
 
-  const prompt = `You are the STRICT official AI judge for the Amrut Durgotsav (दुर्गोत्सव) — a FORT (किल्ला) making competition. This competition is ONLY about handmade replicas of traditional Maratha / Indian hillforts (किल्ला). 
+  const prompt = `You are the STRICT official AI judge for the Amrut Durgotsav (दुर्गोत्सव) — a FORT (किल्ला) making competition.
 
-⚠️ CRITICAL RULES — READ CAREFULLY:
+🎯 YOUR ONLY JOB: Check if this photo meets ALL 3 required criteria below.
+If ANY ONE criteria fails → isValid = false. No exceptions. No second chances.
 
-RULE 1 — MUST BE A FORT (किल्ला) SPECIFICALLY:
-The image MUST show a handmade replica of a traditional Maratha or Indian HILLFORT (किल्ला) with fort-like features such as:
-  - Fortification walls (तट / बुरुज)
-  - Watchtowers or bastions
-  - Fort gates (दरवाजा)
-  - Battlements or ramparts
-  - Typical hilltop fort layout
-hasFort = true ONLY if it is clearly a FORT (किल्ला). 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ CRITERIA TO ACCEPT (All 3 must be TRUE):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-❌ REJECT IMMEDIATELY (hasFort = false, isFortSpecifically = false) if the image shows ANY of these:
-  - Mosque / Masjid (मशीद) — domes (घुमट), minarets (मिनार), arched entrances
-  - Temple (मंदिर) or any religious building
-  - Taj Mahal or other monument replica
-  - Church, palace, or modern building
-  - Garden decoration, water fountain, or pond feature
-  - Road, street, footpath, vehicle, or outdoor scene
-  - Selfie or portrait (person only, no fort)
-  - Animals, birds, food, plants, trees, or nature photos
-  - Sky, sunset, landscape, or travel photos
-  - Screenshot, meme, cartoon, drawing, or printed photo
-  - Random objects: books, toys, bags, household items
-  - Any image where the MAIN subject is NOT a traditional Maratha hillfort replica
+CRITERIA 1 — FORT REPLICA (किल्ल्याची प्रतिकृती):
+The photo MUST show a handmade physical replica of a traditional Maratha / Indian hillfort (किल्ला).
+The fort MUST clearly have:
+  - Fortification walls (तट) or bastions (बुरुज)
+  - A fort gate (दरवाजा) or towers
+  - Overall structure of a hilltop fort
+hasFort = true and isFortSpecifically = true ONLY for this.
 
-RULE 2 — PARTICIPANT PRESENT:
-A real person (child or adult) must be clearly visible in the photo standing with the fort replica.
+CRITERIA 2 — PARTICIPANT (सहभागी व्यक्ती):
+A real human person (child or adult) must be clearly and visibly present in the photo along with the fort replica.
+hasPerson = true only if a real person is visible standing with the fort.
 
-RULE 3 — AUTHENTIC PHOTO:
-Must be a real photograph. Reject documents, papers, signatures, wallpapers, AI-generated or digital images.
+CRITERIA 3 — AUTHENTIC REAL PHOTO (मूळ छायाचित्र):
+Must be a real camera photograph of a physical 3D object.
+isAuthentic = true only for this.
 
-Return your decision STRICTLY in JSON format with NO markdown fences:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+❌ REJECT EVERYTHING ELSE (isValid = false):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+If the image does NOT match ALL 3 criteria above, REJECT it.
+This includes but is not limited to: mosque, masjid, temple, Taj Mahal, church, palace, garden, pond, road, vehicle, selfie, animals, food, nature, sky, landscape, screenshot, meme, cartoon, printed photo, random objects, or anything that is NOT a traditional Maratha fort replica with a person.
+
+Return STRICTLY in JSON format with NO markdown fences:
 {
   "isValid": true or false,
   "hasFort": true or false,
   "hasPerson": true or false,
   "isAuthentic": true or false,
   "isFortSpecifically": true or false,
-  "reason": "मराठीत संक्षिप्त कारण (उदा. छायाचित्रात मशिदीची प्रतिकृती आहे, किल्ल्याची नाही. या स्पर्धेत फक्त किल्ल्याची प्रतिकृती मान्य आहे.)"
+  "reason": "मराठीत संक्षिप्त कारण"
 }`;
 
   // Try Gemini Vision models (fast & reliable)
