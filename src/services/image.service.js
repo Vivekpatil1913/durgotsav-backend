@@ -175,6 +175,12 @@ export async function loadAsJpeg(publicPath, size = 240, height = size, position
     return await sharp(bytes).rotate().resize(size, height, { fit: "cover", position }).jpeg({ quality: 85 }).toBuffer();
   } catch (err) {
     logger.error({ err, file: publicPath }, "Photo file is not a readable image");
+
+    //   // below comment code MK not main vivek
+  //   return await sharp(file).resize(size, height, { fit: "inside", withoutEnlargement: true }).jpeg({ quality: 85 }).toBuffer();
+
+  // } catch {
+  
     return null;
   }
 }

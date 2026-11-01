@@ -10,10 +10,14 @@ import { createCache } from "../../utils/cache.js";
 import { assertBrowsable, cappedCount, cappedMeta, COUNT_CAP, paginate, sortSql } from "../../utils/pagination.js";
 import { registrationWindow } from "../settings/settings.service.js";
 import * as certificates from "../certificates/certificates.service.js";
-import { certificateLink, certificateToken } from "../certificates/certificate.links.js";
-import * as sms from "../sms/sms.queue.js";
-import { clearGalleryCache, setWebsiteGalleryDisplay } from "../gallery/gallery.service.js";
-import { enqueueRejectionEmails } from "./rejection-emails.js";
+
+// below comment code main brnch vivek
+// import { certificateLink, certificateToken } from "../certificates/certificate.links.js";
+// import * as sms from "../sms/sms.queue.js";
+// import { clearGalleryCache, setWebsiteGalleryDisplay } from "../gallery/gallery.service.js";
+// import { enqueueRejectionEmails } from "./rejection-emails.js";
+
+import { verifyParticipantPhotoWithAI } from "../../services/ai-moderation.service.js";
 
 const NEAR_DUPLICATE_BITS = 6;
 // Upper bound on the photos compared exactly per near-duplicate check (see findDuplicatePhoto)
@@ -289,8 +293,25 @@ export async function register(input, files, meta) {
   // The registration number comes first (the photos' S3 metadata carries it); the photos are then stored and checked
   // for duplicates with no transaction open, and the transaction only inserts rows — it never waits on a disk or S3.
   // A number taken by a submission that fails is skipped, as after any rolled-back insert.
-  const { rows: next } = await query("SELECT nextval('registrations_id_seq')::int AS id");
-  const owner = { id: next[0].id, name: input.name, phone: input.phone };
+
+    // below comment code main brnch vivek
+  // const { rows: next } = await query("SELECT nextval('registrations_id_seq')::int AS id");
+  // const owner = { id: next[0].id, name: input.name, phone: input.phone };
+
+
+  // AI Moderation check on participant fort photo (Gemini) - mk
+  let aiResult = { isValid: false, aiUnavailable: true };
+  try {
+    aiResult = await verifyParticipantPhotoWithAI(prepared.buffer);
+  } catch (err) {
+    logger.warn({ err: err.message }, "AI moderation error, safely falling back to manual admin review");
+  }
+
+  // Option 2 (100% Safe): Never block registration.
+  // If AI approves -> automatically verified + instant certificate download.
+  // If AI rejects, fails, times out, or quota exhausted -> fallback to 'pending' (original manual admin review).
+  const aiVerified = Boolean(aiResult?.isValid && !aiResult?.aiUnavailable);
+
   const written = newWritten();
   try {
     const photos = [];
@@ -300,23 +321,75 @@ export async function register(input, files, meta) {
       photos.push({ photo, position: index + 1, duplicateOf: await findDuplicatePhoto(photo, owner.id) });
     }
     return await withTransaction(async (client) => {
-      const { rows } = await client.query(
-        `INSERT INTO registrations
-           (id, participant_type, name, organization_name, phone, email, country,
-            district_id, division_id, taluka_id, city, fort_id, replica_notes,
-            ip_address, user_agent, submission_id, members_count, whatsapp_number)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
-         RETURNING id, status, created_at`,
-        [owner.id, input.participant_type ?? null, input.name, input.organization_name ?? null, input.phone,
-          input.email ?? null, input.country || "India",
-          input.country === "India" ? input.district_id : null,
-          input.country === "India" ? (division_id ?? null) : null,
-          input.country === "India" ? (input.taluka_id ?? null) : null,
-          input.city ?? null, input.fort_id ?? null, input.replica_notes ?? null,
-          meta.ip, meta.userAgent?.slice(0, 300) ?? null, input.submission_id ?? null,
-          input.participant_type && input.participant_type !== "individual" ? (input.members_count ?? null) : null,
-          input.whatsapp_number ?? null],
-      );
+
+        // below comment code main brnch vivek
+      // const { rows } = await client.query(
+      //   `INSERT INTO registrations
+      //      (id, participant_type, name, organization_name, phone, email, country,
+      //       district_id, division_id, taluka_id, city, fort_id, replica_notes,
+      //       ip_address, user_agent, submission_id, members_count, whatsapp_number)
+      //    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+      //    RETURNING id, status, created_at`,
+      //   [owner.id, input.participant_type ?? null, input.name, input.organization_name ?? null, input.phone,
+      //     input.email ?? null, input.country || "India",
+      //     input.country === "India" ? input.district_id : null,
+      //     input.country === "India" ? (division_id ?? null) : null,
+      //     input.country === "India" ? (input.taluka_id ?? null) : null,
+      //     input.city ?? null, input.fort_id ?? null, input.replica_notes ?? null,
+      //     meta.ip, meta.userAgent?.slice(0, 300) ?? null, input.submission_id ?? null,
+      //     input.participant_type && input.participant_type !== "individual" ? (input.members_count ?? null) : null,
+      //     input.whatsapp_number ?? null],
+      // );
+
+
+      let rows;
+      if (aiVerified) {
+        // AI approved → insert as 'verified' with review note
+        ({ rows } = await client.query(
+          `INSERT INTO registrations
+             (participant_type, name, organization_name, phone, email, country,
+              district_id, division_id, taluka_id, city, fort_id, replica_notes,
+              ip_address, user_agent, submission_id, members_count, whatsapp_number,
+              status, reviewed_at, review_note)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, 'verified', NOW(), $18)
+           RETURNING id, status, created_at`,
+          [input.participant_type, input.name, input.organization_name ?? null, input.phone,
+            input.email ?? null, input.country || "India",
+            input.country === "India" ? input.district_id : null,
+            input.country === "India" ? (division_id ?? null) : null,
+            input.country === "India" ? (input.taluka_id ?? null) : null,
+            input.city ?? null, input.fort_id ?? null, input.replica_notes ?? null,
+            meta.ip, meta.userAgent?.slice(0, 300) ?? null, input.submission_id ?? null,
+            input.participant_type === "individual" ? null : (input.members_count ?? null),
+            input.whatsapp_number ?? null,
+            aiResult.reason || "AI Verified"],
+        ));
+      } else {
+        // Fallback: AI rejected, quota exhausted, or unavailable → insert as 'pending' (original flow, admin will review)
+        const pendingNote = (!aiResult?.isValid && !aiResult?.aiUnavailable && aiResult?.reason)
+          ? `AI तपासणी: ${aiResult.reason}`
+          : null;
+        ({ rows } = await client.query(
+          `INSERT INTO registrations
+             (participant_type, name, organization_name, phone, email, country,
+              district_id, division_id, taluka_id, city, fort_id, replica_notes,
+              ip_address, user_agent, submission_id, members_count, whatsapp_number,
+              status, review_note)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, 'pending', $18)
+           RETURNING id, status, created_at`,
+          [input.participant_type, input.name, input.organization_name ?? null, input.phone,
+            input.email ?? null, input.country || "India",
+            input.country === "India" ? input.district_id : null,
+            input.country === "India" ? (division_id ?? null) : null,
+            input.country === "India" ? (input.taluka_id ?? null) : null,
+            input.city ?? null, input.fort_id ?? null, input.replica_notes ?? null,
+            meta.ip, meta.userAgent?.slice(0, 300) ?? null, input.submission_id ?? null,
+            input.participant_type === "individual" ? null : (input.members_count ?? null),
+            input.whatsapp_number ?? null,
+            pendingNote],
+        ));
+      }
+
       const registration = rows[0];
       await lockedExactDuplicates(client, photos, registration.id);
       // A new registration has no earlier photo to retire
@@ -328,19 +401,47 @@ export async function register(input, files, meta) {
       // does not stop one) cannot flood a stranger's phone or the SMS bill. Every registration is still saved, and the
       // website lists all of a number's registrations.
       // One probe of the (phone, id) index: is the number's ACK_SMS_PER_DAY-th earlier registration less than a day old?
-      const { rows: [nth] } = await client.query(
-        `SELECT created_at > NOW() - INTERVAL '1 day' AS recent FROM registrations
-         WHERE phone = $1 AND id < $2 AND deleted_at IS NULL ORDER BY id DESC OFFSET ${ACK_SMS_PER_DAY - 1} LIMIT 1`,
-        [input.phone, registration.id],
-      );
-      if (!nth?.recent) await sms.enqueue(client, "registration_ack", [{ id: registration.id, phone: input.phone }]);
-      return {
-        id: registration.id,
-        registration_no: formatRegistrationNo(registration.id),
-        status: registration.status,
-        created_at: registration.created_at,
-        token: certificateToken(registration.id),
-      };
+
+        // below comment code main brnch vivek
+      // const { rows: [nth] } = await client.query(
+      //   `SELECT created_at > NOW() - INTERVAL '1 day' AS recent FROM registrations
+      //    WHERE phone = $1 AND id < $2 AND deleted_at IS NULL ORDER BY id DESC OFFSET ${ACK_SMS_PER_DAY - 1} LIMIT 1`,
+      //   [input.phone, registration.id],
+      // );
+      // if (!nth?.recent) await sms.enqueue(client, "registration_ack", [{ id: registration.id, phone: input.phone }]);
+      // return {
+      //   id: registration.id,
+      //   registration_no: formatRegistrationNo(registration.id),
+      //   status: registration.status,
+      //   created_at: registration.created_at,
+      //   token: certificateToken(registration.id),
+      // };
+      
+
+      if (aiVerified) {
+        // Issue certificate immediately and return download link
+        await certificates.issue(client, registration.id, null);
+        const certRes = await client.query("SELECT certificate_no, durgveer_no FROM certificates WHERE registration_id = $1", [registration.id]);
+        const cert = certRes.rows[0];
+        return {
+          id: registration.id,
+          registration_no: formatRegistrationNo(registration.id),
+          status: "verified",
+          certificate_no: cert?.certificate_no,
+          durgveer_no: cert?.durgveer_no,
+          phone: input.phone,
+          download_url: `/api/certificates/download?registration=${encodeURIComponent(formatRegistrationNo(registration.id))}&phone=${encodeURIComponent(input.phone)}`,
+          created_at: registration.created_at,
+        };
+      } else {
+        // Pending — original flow: admin approves, then certificate + SMS sent automatically
+        return {
+          id: registration.id,
+          registration_no: formatRegistrationNo(registration.id),
+          status: registration.status,
+          created_at: registration.created_at,
+        };
+      }
     });
   } catch (err) {
     if (!(await savedAfterAll("SELECT 1 FROM registrations WHERE id = $1", [owner.id]))) await discardWritten(written);
