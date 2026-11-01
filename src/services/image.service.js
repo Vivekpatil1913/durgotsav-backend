@@ -151,7 +151,8 @@ export async function storeContentImage(file, folder) {
 
 // pdfkit embeds only JPEG/PNG — convert any stored public image to a small JPEG buffer.
 // position: sharp crop gravity/strategy ("attention" keeps the most salient part when the frame is much wider than the photo)
-export async function loadAsJpeg(publicPath, size = 240, height = size, position = "centre") {
+// fit "contain": the whole photo, uncropped, at its own aspect ratio, fitting inside size×height
+export async function loadAsJpeg(publicPath, size = 240, height = size, position = "centre", fit = "cover") {
   if (!publicPath?.startsWith("/uploads/")) return null;
   const file = path.join(paths.uploads, publicPath.slice("/uploads/".length));
   if (!file.startsWith(paths.uploads)) return null; // no path traversal
@@ -168,7 +169,10 @@ export async function loadAsJpeg(publicPath, size = 240, height = size, position
     throw Object.assign(new Error("Photo could not be read"), { code: "PHOTO_UNREADABLE", cause: err });
   }
   try {
-    return await sharp(bytes).resize(size, height, { fit: "cover", position }).jpeg({ quality: 85 }).toBuffer();
+    if (fit === "contain") {
+      return await sharp(bytes).rotate().resize(size, height, { fit: "inside" }).jpeg({ quality: 92 }).toBuffer();
+    }
+    return await sharp(bytes).rotate().resize(size, height, { fit: "cover", position }).jpeg({ quality: 85 }).toBuffer();
   } catch (err) {
     logger.error({ err, file: publicPath }, "Photo file is not a readable image");
     return null;

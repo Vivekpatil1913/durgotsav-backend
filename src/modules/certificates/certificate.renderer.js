@@ -34,7 +34,8 @@ const TEMPLATE = {
     x: 318, width: 398, baseline: 547, size: 23.3, minSize: 16.5, minScaling: 80,
     rule: { top: 548.5, height: 3.5, paper: "#ECE8E3", gap: 1.3 },
   },
-  photo: { x: 124, y: 670.5, width: 161, height: 77, radius: 6 }, // empty area above "मी आणि माझा दुर्ग"
+  // empty area above "मी आणि माझा दुर्ग", grown upward into the free paper so portrait photos print at a readable size
+  photo: { x: 124, y: 610, width: 161, height: 137.5, radius: 6 },
   // after "दुर्गवीर क्र." (same baseline); free paper up to the seal at x≈495, so longer numbers only shrink past maxWidth
   durgveerNo: { x: 206, baseline: 788, size: 17, maxWidth: 150 },
   certNo: { baseline: 842, size: 11 }, // dark outer border
@@ -86,11 +87,16 @@ async function prepare(cert, { requirePhoto }) {
     throw new CertificateDataError("NO_DURGVEER_NO", `Certificate of registration ${id} has no दुर्गवीर number`);
   }
   const t = TEMPLATE.photo;
-  const photo = await loadAsJpeg(photoPath, t.width * 3, t.height * 3, "attention");
+  const photo = await loadAsJpeg(photoPath, t.width * 4, t.height * 4, "centre", "contain");
   if (!photo && requirePhoto) {
     throw new CertificateDataError("PHOTO_MISSING", `Photo of registration ${id} could not be read (${photoPath ?? "none on record"})`);
   }
-  return photo;
+  if (!photo) return null;
+  // The whole photo as uploaded, centred in the photo area at its own aspect ratio
+  const meta = await sharp(photo).metadata();
+  const scale = Math.min(t.width / meta.width, t.height / meta.height);
+  const [width, height] = [meta.width * scale, meta.height * scale];
+  return { data: photo, x: t.x + (t.width - width) / 2, y: t.y + (t.height - height) / 2, width, height };
 }
 
 // ---------------------------------------------------------------- PDF
@@ -131,9 +137,9 @@ function drawPage(doc, cert, photo) {
   doc.font("deva");
 
   if (photo) {
-    const { x, y, width, height, radius } = t.photo;
-    doc.save().roundedRect(x, y, width, height, radius).clip();
-    doc.image(photo, x, y, { width, height });
+    const { x, y, width, height } = photo;
+    doc.save().roundedRect(x, y, width, height, t.photo.radius).clip();
+    doc.image(photo.data, x, y, { width, height });
     doc.restore();
   }
 
@@ -250,10 +256,10 @@ export async function renderCertificateImage(cert, { requirePhoto = false, quali
 
   const layers = [{ input: Buffer.from(svg), top: 0, left: 0 }];
   if (photo) {
-    const { x, y, width, height, radius } = t.photo;
+    const { x, y, width, height } = photo;
     const [w, h] = [px(width), px(height)].map(Math.round);
-    const mask = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><rect width="${w}" height="${h}" rx="${px(radius)}" fill="#fff"/></svg>`);
-    const rounded = await sharp(photo).resize(w, h, { fit: "cover", position: "attention" })
+    const mask = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><rect width="${w}" height="${h}" rx="${px(t.photo.radius)}" fill="#fff"/></svg>`);
+    const rounded = await sharp(photo.data).resize(w, h, { fit: "fill" })
       .composite([{ input: mask, blend: "dest-in" }]).png().toBuffer();
     layers.unshift({ input: rounded, left: Math.round(px(x)), top: Math.round(px(y)) });
   }
