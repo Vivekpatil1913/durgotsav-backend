@@ -182,109 +182,11 @@ const addPage = (doc) => doc.addPage({ size: [TEMPLATE.width, TEMPLATE.height], 
  * requirePhoto: refuse to render without the participant's photo (emailed certificates). Downloads stay lenient.
  */
 export async function renderCertificatePdf(cert, { requirePhoto = false } = {}) {
-
-  // below comment code main brnch vivek
-  // const photo = await prepare(cert, { requirePhoto });
-  // const { doc, done } = pdfDocument({
-  //   Title: `अभिनंदन पत्र — ${cert.name}`,
-  //   // Lets anyone holding the file trace it back to exactly one registration
-  //   Keywords: `${formatRegistrationNo(cert.registration_id)}, ${cert.certificate_no}, Durgveer ${cert.durgveer_no}`,
-
-
-  const { registration_id: id, name, photo_path: photoPath, certificate_no: certificateNo, durgveer_no: durgveerNo } = cert;
-  if (!Number.isInteger(durgveerNo) || durgveerNo < 1) {
-    throw new CertificateDataError("NO_DURGVEER_NO", `Certificate of registration ${id} has no दुर्गवीर number`);
-  }
-  const t = TEMPLATE;
-  const { template, font, nameFont } = loadAssets();
-  // Load photo: use 'inside' fit so the full photo is loaded without any cropping.
-  // The renderer scales/positions it to fit the certificate box correctly.
-  const photo = await loadAsJpeg(photoPath, t.photo.width * 3, t.photo.height * 3, "top");
-
-  if (!photo && requirePhoto) {
-    throw new CertificateDataError("PHOTO_MISSING", `Photo of registration ${id} could not be read (${photoPath ?? "none on record"})`);
-  }
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({
-      size: [t.width, t.height],
-      margin: 0,
-      info: {
-        Title: `अभिनंदन पत्र — ${name}`,
-        Author: "AMRUT",
-        Subject: `Amrut Durgotsav ${EDITION_YEAR}`,
-        // Lets anyone holding the file trace it back to exactly one registration
-        Keywords: `${formatRegistrationNo(id)}, ${certificateNo}, Durgveer ${durgveerNo}`,
-      },
-    });
-    const chunks = [];
-    doc.on("data", (c) => chunks.push(c));
-    doc.on("end", () => resolve(Buffer.concat(chunks)));
-    doc.on("error", reject);
-
-    doc.image(template, 0, 0, { width: t.width, height: t.height });
-    doc.registerFont("deva", font);
-    doc.registerFont("name", nameFont);
-
-    // Name centred on the blank line, a little larger than the sentence around it; long names are fitted to the line.
-    // Narrowing is a transform, not pdfkit's horizontalScaling: pdfkit re-positions Devanagari text after every
-    // positioned vowel sign without that scaling, which would leave gaps and push the name past the line.
-    doc.font("name");
-    const fit = fitToLine(doc, name, t.nameLine);
-    const nameX = t.nameLine.x + (t.nameLine.width - fit.width) / 2;
-    const nameOptions = { baseline: "alphabetic", lineBreak: false };
-    const { rule } = t.nameLine;
-    doc.save();
-    if (fit.scaling !== 100) doc.scale(fit.scaling / 100, 1, { origin: [nameX, t.nameLine.baseline] });
-    doc.fontSize(fit.size);
-    // Skip-ink: a paper-coloured outline of the name, clipped to the rule's band, opens a small gap in the rule
-    // wherever a hanging vowel sign crosses it; nothing outside that band is touched
-    doc.save().rect(0, rule.top, t.width, rule.height).clip();
-    doc.lineWidth(rule.gap * 2).lineJoin("round").strokeColor(rule.paper).fillColor(rule.paper)
-      .text(name, nameX, t.nameLine.baseline, { ...nameOptions, fill: true, stroke: true });
-    doc.restore();
-    doc.fillColor("#3B2414").text(name, nameX, t.nameLine.baseline, nameOptions);
-    doc.restore();
-    doc.font("deva");
-
-    if (photo) {
-      const { x, y, width, height, radius } = t.photo;
-      doc.save().roundedRect(x, y, width, height, radius).clip();
-      // Fit the photo into the box: scale down so the full height fits (contain on height),
-      // then centre horizontally — this keeps the person visible without cropping the top.
-      const imgInfo = doc.openImage(photo);
-      const imgW = imgInfo.width;
-      const imgH = imgInfo.height;
-      // Scale to fit height of box, then check if width fits too
-      let drawW = (imgW / imgH) * height;
-      let drawH = height;
-      if (drawW > width) {
-        // Image is too wide even when fitted to height — fit to width instead
-        drawH = (imgH / imgW) * width;
-        drawW = width;
-      }
-      const drawX = x + (width - drawW) / 2;
-      const drawY = y + (height - drawH) / 2;
-      doc.image(photo, drawX, drawY, { width: drawW, height: drawH });
-      doc.restore();
-    }
-
-    // दुर्गवीर number: unique per certificate, assigned once from a database sequence.
-    // Bold like the "दुर्गवीर क्र." label: fill + a thin stroke (pdfkit embeds only the font's default Regular outlines).
-    const number = toMarathiDigits(durgveerNo);
-    let numberSize = t.durgveerNo.size;
-    while (numberSize > 10 && doc.fontSize(numberSize).widthOfString(number) > t.durgveerNo.maxWidth) numberSize -= 0.5;
-    doc.save().lineWidth(0.45).strokeColor("#000000").fontSize(numberSize).fillColor("#000000")
-      .text(number, t.durgveerNo.x, t.durgveerNo.baseline, { baseline: "alphabetic", lineBreak: false, fill: true, stroke: true });
-    doc.restore();
-
-    // Certificate number for authenticity check at /certificate (verify)
-    // Printed on the dark outer border, hence the light colour. The explicit height stops pdfkit
-    // from treating text this close to the page edge as overflow and starting a second page.
-    doc.fontSize(11).fillColor("#E9D3A6")
-      .text(`Certificate No. ${certificateNo}  ·  Verify at amrutdurgotsav.com/certificate`, 0, t.certNo.baseline,
-        { width: t.width, height: 40, align: "center", baseline: "alphabetic", lineBreak: false });
-
-    doc.end();
+  const photo = await prepare(cert, { requirePhoto });
+  const { doc, done } = pdfDocument({
+    Title: `अभिनंदन पत्र — ${cert.name}`,
+    // Lets anyone holding the file trace it back to exactly one registration
+    Keywords: `${formatRegistrationNo(cert.registration_id)}, ${cert.certificate_no}, Durgveer ${cert.durgveer_no}`,
   });
   addPage(doc);
   drawPage(doc, cert, photo);
