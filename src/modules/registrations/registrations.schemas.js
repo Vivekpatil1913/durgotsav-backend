@@ -81,12 +81,16 @@ export const lookupSchema = z.object({
   format: z.enum(["pdf", "jpg"]).default("pdf"),
 });
 
+// Registrations per lookup page: the website asks for a few at a time and loads more as its list scrolls; at most
+// certificates.service LOOKUP_PAGE_SIZE, which is also the default
+const lookupLimit = z.coerce.number().int().min(1).max(20).default(20);
 // Every registration of one mobile number: the first page (the route also requires the CAPTCHA) …
-export const mobileLookupSchema = z.object({ phone: anyMobile });
+export const mobileLookupSchema = z.object({ phone: anyMobile, limit: lookupLimit });
 // … and the following ones, with the lookup token the first page returned (no new CAPTCHA for 30 minutes)
 export const mobileLookupPageSchema = z.object({
   lookup_token: z.string().regex(LOOKUP_TOKEN_PATTERN, "This search has expired. Please search again"),
   before: z.coerce.number().int().positive(),
+  limit: lookupLimit,
 });
 
 export const tokenParams = z.object({ token: z.string().regex(TOKEN_PATTERN, "This certificate link is not valid") });
