@@ -1,288 +1,148 @@
-
 import sharp from "sharp";
 import { logger } from "../utils/logger.js";
 
-const GEMINI_MODEL =
-  process.env.GEMINI_MODEL || "gemini-2.5-flash";
+/**
+ * Analyzes participant fort photo using Gemini Vision models.
+ * Returns:
+ *   { isValid: true,  aiUnavailable: false, reason, details }   → AI approved
+ *   { isValid: false, aiUnavailable: false, reason, details }   → AI rejected (bad photo)
+ *   { isValid: false, aiUnavailable: true,  reason }            → AI unreachable; fallback to manual admin review (original flow)
+ */
+export async function verifyParticipantPhotoWithAI(imageBuffer) {
+  // Convert image to optimized lightweight JPEG for rapid AI processing
+  const jpegBuffer = await sharp(imageBuffer)
+    .resize(600, 600, { fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality: 70 })
+    .toBuffer();
 
-const MODERATION_PROMPT = `
-You are an image moderation system for Amrut Durgotsav,
-a traditional Indian fort-making competition.
+  const base64Image = jpegBuffer.toString("base64");
 
-Perform THREE INDEPENDENT VERIFICATION CHECKS.
+  const prompt = `You are the STRICT official AI judge for the Amrut Durgotsav (दुर्गोत्सव) — an authentic Maratha FORT (किल्ला) making competition.
+ 
+⚠️ ABSOLUTE DISQUALIFICATION RULE — MOSQUE / MASJID / DARGAH / TEMPLE (मशीद / दर्गा / मंदिर):
+Examine the physical structure in the photo very carefully:
+Does the structure contain ANY elements of a Mosque (मशीद), Dargah (दर्गा), Mausoleum, Tomb, or Temple (मंदिर)?
+Look specifically for:
+  - Domes (घुमट / कंदुरी घुमट) with or without crescent (चंद्रकोर)
+  - Minarets (मिनार) or minaret-like spires
+  - Islamic arched gateways (मेहराब / कमान)
+  - Urdu, Arabic, or Perso-Arabic name tags / calligraphy (e.g. मेहराब, हुजरा)
+  - Religious monument architecture (e.g. Taj Mahal, Dargah, Mosque)
 
-CHECK 1: FORT DETECTION
+⚠️ IMPORTANT EXCEPTION OVERRIDE:
+Even if the structure is built with stone walls (तटबंदी), has water/pond/moat around it, has a statue of Chhatrapati Shivaji Maharaj, has a saffron flag (भगवा ध्वज), or has a child standing next to it — IF THE CENTRAL STRUCTURE IS A MOSQUE, MASJID, OR DARGAH, IT IS IMMEDIATELY DISQUALIFIED!
+In that case, you MUST set:
+  "hasMosqueOrDargahOrTemple": true,
+  "isFortSpecifically": false,
+  "isValid": false
 
-Identify whether the image clearly contains a physical
-3D handmade traditional Indian / Maratha fort replica.
-
-ACCEPTABLE FORT FEATURES:
-- Fortification walls (तट)
-- Bastions (बुरुज)
-- Fort gates (दरवाजा)
-- Towers and defensive structures
-- Hill fort miniature models
-- Handmade Diwali forts
-- Models made using mud, soil, stones, bricks,
-  cardboard, clay, thermocol or similar materials.
-
-A fort replica can be large or small.
-It can be created at home, school or outdoors.
-
-CHECK 2: PARTICIPANT DETECTION
-
-Check whether at least one real person is clearly
-visible along with the fort replica.
-
-Accept:
-- Individual photos with a fort.
-- Group photos with a fort.
-- Children with a fort.
-- Adults with a fort.
-
-The person does not need to stand immediately
-next to the fort, but must be visible in the photo.
-
-CHECK 3: IMAGE AUTHENTICITY AND UNRELATED OBJECTS
-
-Determine whether this appears to be a real camera
-photograph of a physical fort model.
-
-AI-GENERATED IMAGE:
-- If there is strong visual evidence that the image
-  is AI-generated or digitally fabricated, mark it
-  as AI_SUSPECTED.
-- If uncertain, mark it as UNCERTAIN.
-- Do not claim AI detection with 100% certainty.
-- Normal image editing, compression or filters alone
-  do not prove AI generation.
-
-UNRELATED IMAGES:
-Identify images showing:
-- Mosque / Masjid
-- Temple without a fort replica
-- Normal buildings
-- Houses
-- Farms / agricultural fields
-- Roads and vehicles
-- Gardens and landscapes
-- Waterfalls, rivers and mountains
-- Animals
-- Selfies without a visible fort
-- Other unrelated objects or activities.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ CRITERIA TO ACCEPT (All must be TRUE):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. FORT REPLICA: Must be a genuine handmade replica of a traditional Maratha / Indian hillfort (किल्ला) with authentic fortification walls (तट), bastions (बुरुज), and fort gates. It must NOT be a religious building.
+2. PARTICIPANT: A real human person does NOT need to be visible in the photo. The photo can contain only the handmade fort replica. Presence or absence of a person must NOT affect the verification result.
+3. AUTHENTIC REAL PHOTO: The image must show a real photograph of a physically constructed 3D handmade fort model.
+4. NO MOSQUE / RELIGIOUS STRUCTURE: hasMosqueOrDargahOrTemple MUST BE false.
 
 IMPORTANT:
-A building, wall or boundary alone is NOT a fort.
-A temple or mosque is NOT a fort.
-A real fort replica must be clearly identifiable.
+- A person standing with the fort is optional.
+- A child or family standing with the fort is optional.
+- A photo containing only the fort is acceptable.
+- However, a genuine physical fort replica MUST be clearly visible.
+- If no proper fort replica is visible, reject the image.
+- Do NOT approve images containing only landscapes,
+  mountains, buildings, toys, drawings, or digital illustrations.
 
-FINAL DECISION RULES:
-
-APPROVED:
-Only when ALL conditions are true:
-1. A clear physical handmade fort replica exists.
-2. At least one real participant is visible.
-3. Image appears to be a genuine photograph.
-4. No strong evidence of AI generation.
-
-PENDING:
-Use PENDING for ALL other cases:
-- AI-generated or AI-suspected photos.
-- Mosque, temple, house, building or farm.
-- Other unrelated images.
-- Fort without a visible participant.
-- Unclear or ambiguous photos.
-- Uncertain authenticity.
-
-NEVER automatically reject an image.
-All non-approved images must go to manual admin review.
-
-Return ONLY valid JSON:
-
+Return STRICTLY in JSON format with NO markdown fences:
 {
-  "hasFort": true,
-  "hasPerson": true,
-  "isAuthentic": true,
-  "isAIGenerated": false,
-  "fortType": "MODEL_FORT",
-  "category": "FORT_WITH_PARTICIPANT",
-  "confidence": 0.98,
-  "status": "APPROVED",
-  "reason": "मराठीत संक्षिप्त कारण"
-}
+  "hasMosqueOrDargahOrTemple": true or false,
+  "hasFort": true or false,
+  "hasPerson": true or false,
+  "isAuthentic": true or false,
+  "isFortSpecifically": true or false,
+  "isValid": true or false,
+  "reason": "मराठीत संक्षिप्त कारण (उदा. छायाचित्रात मशिदीची/धार्मिक प्रतिकृती दिसत आहे, या स्पर्धेत केवळ पारंपारिक मराठा किल्लाच मान्य आहे.)"
+}`;
 
-Allowed values:
-fortType: MODEL_FORT, NONE, UNCERTAIN
-category:
-FORT_WITH_PARTICIPANT,
-AI_GENERATED_SUSPECTED,
-MOSQUE,
-TEMPLE,
-BUILDING,
-HOUSE,
-FARM,
-OTHER,
-UNCERTAIN
-
-isAuthentic:
-true, false, null
-
-status:
-APPROVED, PENDING
-
-Return JSON only. No markdown.
-`;
-
-function parseAIResponse(text) {
-  const cleaned = text
-    .replace(/```json/gi, "")
-    .replace(/```/g, "")
-    .trim();
-
-  const start = cleaned.indexOf("{");
-  const end = cleaned.lastIndexOf("}");
-
-  if (start === -1 || end === -1) {
-    throw new Error("Invalid Gemini JSON response");
-  }
-
-  return JSON.parse(cleaned.slice(start, end + 1));
-}
-
-function pendingResult(reason, details = null) {
-  return {
-    isValid: false,
-    status: "PENDING",
-    aiUnavailable: false,
-    reason,
-    details,
-  };
-}
-
-export async function verifyParticipantPhotoWithAI(imageBuffer) {
-  try {
-    const jpegBuffer = await sharp(imageBuffer)
-      .rotate()
-      .resize(768, 768, {
-        fit: "inside",
-        withoutEnlargement: true,
-      })
-      .jpeg({ quality: 80 })
-      .toBuffer();
-
-    const base64Image = jpegBuffer.toString("base64");
-
-    const geminiKey = process.env.GEMINI_API_KEY;
-
-    if (!geminiKey) {
-      return {
-        isValid: false,
-        status: "PENDING",
-        aiUnavailable: true,
-        reason: "Gemini API key उपलब्ध नाही. Admin review आवश्यक आहे.",
-      };
-    }
-
-    const geminiUrl =
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${geminiKey}`;
-
-    const response = await fetch(geminiUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      signal: AbortSignal.timeout(30000),
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              { text: MODERATION_PROMPT },
+  // Try Gemini Vision models (fast & reliable)
+  const geminiKey = process.env.GEMINI_API_KEY;
+  if (geminiKey) {
+    const candidateModels = ["gemini-flash-lite-latest", "gemini-3.5-flash"];
+    for (const model of candidateModels) {
+      try {
+        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`;
+        const res = await fetch(geminiUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: AbortSignal.timeout(15000),
+          body: JSON.stringify({
+            contents: [
               {
-                inline_data: {
-                  mime_type: "image/jpeg",
-                  data: base64Image,
-                },
+                parts: [
+                  { text: prompt },
+                  {
+                    inline_data: {
+                      mime_type: "image/jpeg",
+                      data: base64Image,
+                    },
+                  },
+                ],
               },
             ],
-          },
-        ],
-        generationConfig: {
-          temperature: 0,
-          response_mime_type: "application/json",
-        },
-      }),
-    });
+            generationConfig: {
+              temperature: 0.1,
+              response_mime_type: "application/json",
+            },
+          }),
+        });
 
-    const data = await response.json();
+        const data = await res.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text) {
+          const match = text.match(/\{[\s\S]*\}/);
+          if (match) {
+            const result = JSON.parse(match[0]);
+            logger.info({ aiModel: model, aiResult: result }, "AI moderation completed via Gemini Vision");
+            // Hard check: if mosque / dargah / religious monument detected, immediately disqualify
+            if (result.hasMosqueOrDargahOrTemple === true) {
+              return {
+                isValid: false,
+                aiUnavailable: false,
+                reason: result.reason || "छायाचित्रात मशीद / दर्गा / धार्मिक वास्तूची प्रतिकृती दिसत आहे. या स्पर्धेत केवळ पारंपारिक मराठा किल्ल्याची प्रतिकृतीच ग्राह्य धरली जाईल.",
+                details: result,
+              };
+            }
 
-    if (!response.ok) {
-      throw new Error(
-        data.error?.message || `Gemini API error: ${response.status}`
-      );
+            const isApproved = Boolean(
+              result.isValid &&
+              result.hasFort &&
+              result.hasPerson &&
+              result.isAuthentic &&
+              result.isFortSpecifically &&
+              !result.hasMosqueOrDargahOrTemple
+            );
+
+            return {
+              isValid: isApproved,
+              aiUnavailable: false,
+              reason: result.reason || (isApproved ? "छायाचित्र पडताळणी यशस्वी" : "छायाचित्रात किल्ल्याची प्रतिकृती किंवा व्यक्ती दिसत नाही."),
+              details: result,
+            };
+          }
+        } else if (data.error) {
+          logger.warn({ model, error: data.error.message || data.error }, "Gemini model error, trying next fallback");
+        }
+      } catch (err) {
+        logger.warn({ model, err: err.message }, "Gemini model attempt failed, trying next fallback");
+      }
     }
-
-    const aiText =
-      data.candidates?.[0]?.content?.parts
-        ?.map((part) => part.text || "")
-        .join("") || "";
-
-    if (!aiText) {
-      throw new Error("Empty Gemini response");
-    }
-
-    const result = parseAIResponse(aiText);
-
-    // Validate all required fields.
-    const validFort =
-      result.hasFort === true &&
-      result.fortType === "MODEL_FORT";
-
-    const validPerson = result.hasPerson === true;
-
-    const genuinePhoto =
-      result.isAuthentic === true &&
-      result.isAIGenerated === false;
-
-    // APPROVED only when every condition passes.
-    const isApproved =
-      validFort &&
-      validPerson &&
-      genuinePhoto &&
-      result.status === "APPROVED";
-
-    const finalResult = {
-      isValid: isApproved,
-      status: isApproved ? "APPROVED" : "PENDING",
-      aiUnavailable: false,
-      reason:
-        result.reason ||
-        "छायाचित्र प्रशासकीय तपासणीसाठी पाठवले आहे.",
-      details: result,
-    };
-
-    logger.info(
-      {
-        aiModel: GEMINI_MODEL,
-        aiResult: finalResult,
-      },
-      "Fort photo verification completed"
-    );
-
-    return finalResult;
-
-  } catch (error) {
-    logger.error(
-      { error: error.message },
-      "Gemini photo verification failed"
-    );
-
-    // API failure must never approve a photo.
-    return {
-      isValid: false,
-      status: "PENDING",
-      aiUnavailable: true,
-      reason:
-        "AI पडताळणी सध्या उपलब्ध नाही. फोटो Admin Review साठी पाठवला आहे.",
-    };
   }
+
+  // Gemini unreachable or failed → fallback directly to manual admin review (original flow)
+  logger.warn("Gemini AI unavailable or failed. Registration will fallback to manual admin review.");
+  return {
+    isValid: false,
+    aiUnavailable: true,
+    reason: "AI पडताळणी सेवा उपलब्ध नाही. नोंदणी प्रशासकाच्या तपासणीसाठी पाठवली जाईल.",
+  };
 }
