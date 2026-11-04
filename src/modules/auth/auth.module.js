@@ -8,6 +8,7 @@ import { loginLimiter } from "../../middleware/rateLimit.js";
 import { validate } from "../../middleware/validate.js";
 import { audit } from "../../services/audit.service.js";
 import { asyncHandler, badRequest, conflict, forbidden, notFound, unauthorized } from "../../utils/errors.js";
+import { likeContains } from "../../utils/format.js";
 import { paginate, pageMeta, paginationSchema, sortParams, sortSql } from "../../utils/pagination.js";
 import * as rbac from "../rbac/rbac.service.js";
 
@@ -109,7 +110,7 @@ adminsRouter.get("/",
     const params = [];
     const where = [req.query.trashed === "true" ? "a.deleted_at IS NOT NULL" : "a.deleted_at IS NULL"];
     if (req.query.q) {
-      params.push(`%${req.query.q}%`);
+      params.push(likeContains(req.query.q));
       where.push(`(a.name ILIKE $1 OR a.email ILIKE $1)`);
     }
     const { limit, offset } = paginate(req.query);

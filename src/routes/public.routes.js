@@ -190,7 +190,7 @@ router.get("/certificates/download", lookupLimiter, validate({ query: lookupSche
 router.post("/certificates/lookup", lookupLimiter, requireCaptcha, validate({ body: mobileLookupSchema }),
   asyncHandler(async (req, res) => {
     res.set("Cache-Control", "no-store");
-    const page = await certificates.lookupByPhone(req.body.phone);
+    const page = await certificates.lookupByPhone(req.body.phone, { limit: req.body.limit });
     res.json({ data: page.data, meta: { ...page.meta, lookup_token: lookupToken(req.body.phone) } });
   }));
 
@@ -199,7 +199,7 @@ router.get("/certificates/lookup", lookupPageLimiter, validate({ query: mobileLo
     res.set("Cache-Control", "no-store");
     const phone = parseLookupToken(req.query.lookup_token);
     if (!phone) throw new AppError(401, "This search has expired. Please search again", { code: "LOOKUP_EXPIRED" });
-    res.json(await certificates.lookupByPhone(phone, { before: req.query.before }));
+    res.json(await certificates.lookupByPhone(phone, { before: req.query.before, limit: req.query.limit }));
   }));
 
 // Participant links (/c/<token> on the website: SMS, email, the pop-up after registering, the lookup list):

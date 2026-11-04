@@ -158,7 +158,7 @@ export async function downloadByToken(token) {
   return cert;
 }
 
-// One lookup page = at most this many registrations; also the most a "download all" PDF may hold
+// One lookup page = at most (and by default) this many registrations; also the most a "download all" PDF may hold
 export const LOOKUP_PAGE_SIZE = 20;
 
 // "Download all": the valid certificates among these links (one lookup page), a page each in registration order
@@ -177,22 +177,24 @@ export async function bundleByTokens(tokens) {
 /**
  * Every registration made with this mobile number — any number of them — newest first, a page at a time.
  * Keyset pagination on (phone, id) (index registrations_phone_live_idx): each page is an index range read however
- * many registrations the number has. before: the last id of the previous page. total only on the first page.
+ * many registrations the number has. before: the last id of the previous page. limit: the page size (the website
+ * loads 5 at a time as its list scrolls), at most LOOKUP_PAGE_SIZE. total only on the first page.
  */
-export async function lookupByPhone(phone, { before = null } = {}) {
-  const params = [phone, LOOKUP_PAGE_SIZE + 1];
+export async function lookupByPhone(phone, { before = null, limit = LOOKUP_PAGE_SIZE } = {}) {
+  const size = Math.min(limit, LOOKUP_PAGE_SIZE);
+  const params = [phone, size + 1];
   if (before) params.push(before);
   const [{ rows }, count] = await Promise.all([
     query(`${PUBLIC_SELECT} WHERE r.phone = $1 AND r.deleted_at IS NULL ${before ? "AND r.id < $3" : ""} ORDER BY r.id DESC LIMIT $2`, params),
     before ? null : query("SELECT COUNT(*)::int AS n FROM registrations WHERE phone = $1 AND deleted_at IS NULL", [phone]),
   ]);
-  const page = rows.slice(0, LOOKUP_PAGE_SIZE);
+  const page = rows.slice(0, size);
   return {
     data: page.map(publicView),
     meta: {
-      next_before: rows.length > LOOKUP_PAGE_SIZE ? page[page.length - 1].id : null,
+      next_before: rows.length > size ? page[page.length - 1].id : null,
       ...(count && { total: count.rows[0].n }),
-      page_size: LOOKUP_PAGE_SIZE,
+      page_size: size,
     },
   };
 }
@@ -263,10 +265,15 @@ function search(text, params) {
   return { ids: `ARRAY(${lookups.map((sql) => `(${sql} LIMIT ${COUNT_CAP + 1})`).join(" UNION ")})`, test: `(${tests.join(" OR ")})` };
 }
 
-export async function adminList(f) {
+// allowedDivisionIds: the admin's divisions (null = all); the search and every filter below stay inside them
+export async function adminList(f, allowedDivisionIds = null) {
   assertBrowsable(f, "certificates");
   const where = ["r.deleted_at IS NULL"];
   const params = [];
+  if (allowedDivisionIds !== null) {
+    params.push(allowedDivisionIds);
+    where.push(`r.division_id = ANY($${params.length}::int[])`);
+  }
   if (f.state === "valid") where.push("c.revoked_at IS NULL");
   if (f.state === "revoked") where.push("c.revoked_at IS NOT NULL");
   if (f.emailed === "yes") where.push("c.emailed_at IS NOT NULL");
@@ -282,8 +289,12 @@ export async function adminList(f) {
   // Counting joins the email job only when a filter reads it
   const from = `FROM certificates c JOIN registrations r ON r.id = c.registration_id${f.email_status ? " LEFT JOIN certificate_email_jobs j ON j.certificate_id = c.id" : ""}`;
   const { limit, offset } = paginate(f);
-  const page = (condition) =>
-    query(`${CERT_SELECT} WHERE ${condition} ORDER BY ${sortSql(ADMIN_SORTS, f, "issued_at")} LIMIT ${limit} OFFSET ${offset}`, params);
+  const sort = sortSql(ADMIN_SORTS, f, "issued_at");
+  // The page's ids are picked first and only those rows are joined to the district, photo and email job
+  const page = (condition) => query(
+    `${CERT_SELECT} WHERE c.id = ANY(ARRAY(SELECT c.id ${from} WHERE ${condition} ORDER BY ${sort} LIMIT ${limit} OFFSET ${offset})) ORDER BY ${sort}`,
+    params,
+  );
 
   let list;
   let count;
@@ -385,7 +396,7 @@ export async function resend(registrationId, adminId) {
 // Resolves to { done } once this run holds the lock (409 ALREADY_RUNNING while another run goes on); see the queue
 export const queuePending = (adminId) => emailQueue.queuePending(adminId);
 export const retryFailed = (adminId, options) => emailQueue.retryFailed(adminId, options);
-export const emailQueueStats = () => emailQueue.queueStats();
+export const emailQueueStats = (allowedDivisionIds = null) => emailQueue.queueStats(allowedDivisionIds);
 
 export async function deliveryLog(registrationId) {
   await adminGet(registrationId);

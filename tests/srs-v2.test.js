@@ -239,6 +239,23 @@ describe("mobile-number lookup, page by page, and download all", () => {
     assert.equal(new Set(all).size, 27);
   });
 
+  test("limit: the website's 5 at a time pages through the same registrations, newest first; more than 20 is refused", async () => {
+    const first = (await request(app).post("/api/certificates/lookup").send({ phone, limit: 5 })).body;
+    assert.deepEqual([first.data.length, first.meta.total, first.meta.page_size], [5, 27, 5]);
+    const seen = [...first.data];
+    let next = first.meta.next_before;
+    while (next) {
+      const res = await request(app).get("/api/certificates/lookup").query({ lookup_token: first.meta.lookup_token, before: next, limit: 5 });
+      assert.equal(res.status, 200, JSON.stringify(res.body));
+      assert.ok(res.body.data.length <= 5);
+      seen.push(...res.body.data);
+      next = res.body.meta.next_before;
+    }
+    assert.deepEqual(seen.map((r) => r.registration_no), [...firstPage.data, ...(await request(app).get("/api/certificates/lookup")
+      .query({ lookup_token: firstPage.meta.lookup_token, before: firstPage.meta.next_before })).body.data].map((r) => r.registration_no));
+    assert.equal((await request(app).post("/api/certificates/lookup").send({ phone, limit: 21 })).status, 400);
+  });
+
   test("a forged or expired lookup token is refused", async () => {
     const forged = firstPage.meta.lookup_token.replace("9890000010", "9890000001");
     assert.equal((await request(app).get("/api/certificates/lookup").query({ lookup_token: forged, before: 99999 })).status, 401);

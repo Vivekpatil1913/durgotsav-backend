@@ -171,7 +171,7 @@ export async function register(input, files, meta) {
     if (existing) return existing;
   }
   const [file, file2] = files;
-  if (!file) throw badRequest("Please upload a photo of you with your fort replica", { photo: "Photo is required" });
+  if (!file) throw badRequest("Please upload a selfie with your fort replica or a photograph of the fort replica", { photo: "Photo is required" });
   const { division_id } = await assertReferences(input);
 
   const prepared = await prepareParticipantPhoto(file);
@@ -381,8 +381,9 @@ function buildFilters(f, allowedDivisionIds) {
   if (f.taluka_id)        add("r.taluka_id = ?",        f.taluka_id);
   if (f.fort_id)          add("r.fort_id = ?",          f.fort_id);
   if (f.participant_type) add("r.participant_type = ?",  f.participant_type);
-  if (f.from)             add("r.created_at >= ?::date", f.from);
-  if (f.to)               add("r.created_at < (?::date + 1)", f.to);
+  // Indian days, as the admin sees them, whatever the database's time zone
+  if (f.from)             add("r.created_at >= (?::date)::timestamp AT TIME ZONE 'Asia/Kolkata'", f.from);
+  if (f.to)               add("r.created_at < ((?::date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata'", f.to);
   if (f.duplicates === true) where.push("p.duplicate_of_photo_id IS NOT NULL");
   if (f.featured !== undefined) add("COALESCE(p.is_featured, FALSE) = ?", f.featured);
   if (f.q) {
@@ -396,6 +397,10 @@ function buildFilters(f, allowedDivisionIds) {
   addDivisionScope(where, params, allowedDivisionIds);
   return { where: `WHERE ${where.join(" AND ")}`, params };
 }
+
+// FROM … WHERE … of a list with these filters, for counting (the main-photo join only when a filter reads it)
+const countFrom = (f, where) => `FROM registrations r ${needsPhoto(f) ? PHOTO_JOIN : ""} ${where}`;
+
 
 export async function adminList(filters, allowedDivisionIds) {
   const { where, params } = buildFilters(filters, allowedDivisionIds);

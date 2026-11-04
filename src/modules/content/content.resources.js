@@ -191,7 +191,7 @@ export const enquiries = createCrud({
   searchable: ["name", "email", "phone", "subject", "message"],
   filters: { status: "string" },
   hasSortOrder: false,
-  order: "created_at DESC",
+  order: "created_at DESC, id DESC",
   sortable: ["name", "subject", "status", "created_at"],
   actions: ["list", "get", "update", "delete", "restore"],
   roles: ["admin", "moderator"],

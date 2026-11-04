@@ -12,12 +12,13 @@ import { imageUpload } from "../middleware/upload.js";
 import { validate } from "../middleware/validate.js";
 import { audit, auditMany } from "../services/audit.service.js";
 import { storeContentImage } from "../services/image.service.js";
-import { asyncHandler, badRequest } from "../utils/errors.js";
+import { asyncHandler, badRequest, forbidden } from "../utils/errors.js";
 import { formatRegistrationNo } from "../utils/format.js";
 import { logger } from "../utils/logger.js";
 import { assertBrowsable, cappedCount, cappedMeta, paginate, paginationSchema, sortParams, sortSql } from "../utils/pagination.js";
 import { adminsRouter } from "../modules/auth/auth.module.js";
 import { rbacRouter } from "../modules/rbac/rbac.module.js";
+import { istDateTime } from "../modules/award/award.export.js";
 import { adminAwardRouter } from "../modules/award/award.routes.js";
 import * as registrations from "../modules/registrations/registrations.service.js";
 import { wakeRejectionEmails } from "../modules/registrations/rejection-emails.js";
@@ -30,6 +31,7 @@ import { queueCertificateSms } from "../modules/sms/sms.queue.js";
 import { wakeSmsWorker } from "../modules/sms/sms.worker.js";
 import * as galleryService from "../modules/gallery/gallery.service.js";
 import * as stats from "../modules/stats/stats.service.js";
+import * as statsExport from "../modules/stats/stats.export.js";
 import { getAllSettings, registrationWindow, updateSettings } from "../modules/settings/settings.service.js";
 import { settingsUpdateSchema } from "../modules/settings/settings.definitions.js";
 import { forts, fortImagesRouter } from "../modules/forts/forts.module.js";
@@ -61,6 +63,29 @@ router.get("/stats/districts",
   validate({ query: districtStatsSchema }),
   asyncHandler(async (req, res) =>
     res.json({ data: await stats.districtStats(req.allowedDivisionIds, req.query) })));
+
+// Read fresh (not cached) for the file, so a few at a time per process
+const statsExportAdmission = admission({
+  concurrency: 2, queue: 0, retryAfterSeconds: 30, message: "Another statistics export is being prepared. Please try again shortly",
+});
+
+router.get("/stats/districts/export.:format",
+  checkPermission("dashboard", "read"),
+  checkPermission("reports", "write"),
+  scopeToAdminDivisions,
+  statsExportAdmission,
+  validate({ params: z.object({ format: z.enum(["csv", "xlsx"]) }) }),
+  asyncHandler(async (req, res) => {
+    const { format } = req.params;
+    const report = await stats.districtReport(req.allowedDivisionIds);
+    const body = format === "csv" ? statsExport.toCsv(report) : await statsExport.toXlsx(report);
+    res.set({
+      "Content-Type": format === "csv" ? "text/csv; charset=utf-8" : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "Content-Disposition": `attachment; filename="durgotsav-${EDITION_YEAR}-district-stats.${format}"`,
+      "Cache-Control": "no-store",
+    }).send(body);
+    audit(req, "export", "district_stats", null, { format, registrations: report.summary.total });
+  }));
 
 const divisionStatsSchema = z.object({
   page:  z.coerce.number().int().min(1).default(1),
@@ -111,10 +136,11 @@ reg.get("/export.csv",
     const cols = ["registration_no", "name", "participant_type", "organization_name", "members_count", "phone", "whatsapp_number", "email",
       "country", "division", "district", "taluka", "city", "fort", "replica_notes", "status", "review_note",
       "certificate_no", "durgveer_no", "certificate_revoked_at", "source", "created_at"];
+    // Times in IST, as the admin panel shows them
     const cell = (v) => {
-      let s = v instanceof Date ? v.toISOString() : String(v ?? "");
-      if (/^[=+\-@]/.test(s)) s = `'${s}`;
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      let s = v instanceof Date ? istDateTime.format(v) : String(v ?? "");
+      if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+      return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
     // The first batch is read before anything is sent, so a failure there is an ordinary JSON error for the admin
     const batches = registrations.adminExportStream(req.query, req.allowedDivisionIds);
@@ -267,7 +293,17 @@ router.use("/registrations", reg);
 
 // ------------------------------------------------------------- certificates
 const cert = Router();
-cert.use(checkPermission("certificates", "read"));
+cert.use(checkPermission("certificates", "read"), scopeToAdminDivisions);
+
+// `:id` is the certificate's registration, which must lie in the admin's divisions
+const inAdminDivisions = asyncHandler(async (req, res, next) => {
+  await registrations.assertRegistrationScope(req.params.id, req.allowedDivisionIds);
+  next();
+});
+// These reach every division's certificates at once, so a division-limited admin cannot run them
+const allDivisionsOnly = (req, res, next) =>
+  next(req.allowedDivisionIds === null ? undefined : forbidden("Only an admin with access to all divisions can run this"));
+
 cert.get("/", validate({
   query: paginationSchema.extend({
     q: z.string().trim().max(100).optional(),
@@ -276,15 +312,15 @@ cert.get("/", validate({
     email_status: z.enum(["queued", "processing", "sent", "failed", "skipped", "cancelled", "none"]).optional(),
     ...sortParams(Object.keys(certificates.ADMIN_SORTS), "issued_at"),
   }),
-}), asyncHandler(async (req, res) => res.json(await certificates.adminList(req.query))));
+}), asyncHandler(async (req, res) => res.json(await certificates.adminList(req.query, req.allowedDivisionIds))));
 
 // Email queue health: counts per status, next due time, recent throughput
 cert.get("/email-queue", asyncHandler(async (req, res) => {
   res.set("Cache-Control", "no-store");
-  res.json({ data: { ...(await certificates.emailQueueStats()), mail_enabled: env.mailEnabled } });
+  res.json({ data: { ...(await certificates.emailQueueStats(req.allowedDivisionIds)), mail_enabled: env.mailEnabled } });
 }));
 
-cert.get("/:id/pdf", validate({ params: idParams }),
+cert.get("/:id/pdf", validate({ params: idParams }), inAdminDivisions,
   asyncHandler(async (req, res) => {
     const c = await certificates.adminGet(req.params.id);
     res.set({ "Content-Type": "application/pdf", "Content-Disposition": `inline; filename="${c.certificate_no}.pdf"`, "Cache-Control": "no-store" });
@@ -292,10 +328,10 @@ cert.get("/:id/pdf", validate({ params: idParams }),
   }));
 
 // Every delivery attempt for one certificate (what was sent, to whom, SMTP's answer or the error)
-cert.get("/:id/email-log", validate({ params: idParams }),
+cert.get("/:id/email-log", validate({ params: idParams }), inAdminDivisions,
   asyncHandler(async (req, res) => res.json({ data: await certificates.deliveryLog(req.params.id) })));
 
-cert.post("/:id/resend", validate({ params: idParams }),
+cert.post("/:id/resend", validate({ params: idParams }), inAdminDivisions,
   asyncHandler(async (req, res) => {
     const status = await certificates.resend(req.params.id, req.admin.id);
     audit(req, "resend", "certificate", req.params.id, { status });
@@ -307,6 +343,7 @@ cert.post("/:id/resend", validate({ params: idParams }),
 // this run holds the lock, 409 ALREADY_RUNNING while another (on any instance) goes on; audited when it has finished
 cert.post("/send-pending",
   checkPermission("certificates", "write"),
+  allDivisionsOnly,
   asyncHandler(async (req, res) => {
     const { done } = await certificates.queuePending(req.admin.id);
     done.then(
@@ -322,6 +359,7 @@ cert.post("/send-pending",
 // Addresses the mail server rejected stay failed unless corrected since; include_rejected: true retries those as well
 cert.post("/retry-failed",
   checkPermission("certificates", "write"),
+  allDivisionsOnly,
   validate({ body: z.object({ include_rejected: z.boolean().optional() }) }),
   asyncHandler(async (req, res) => {
     const rejected = Boolean(req.body.include_rejected);
@@ -334,6 +372,7 @@ cert.post("/retry-failed",
 cert.post("/:id/revoke",
   checkPermission("certificates", "write"),
   validate({ params: idParams, body: z.object({ reason: z.string().trim().min(3).max(300) }) }),
+  inAdminDivisions,
   asyncHandler(async (req, res) => {
     await certificates.revoke(req.params.id, req.admin.id, req.body.reason);
     audit(req, "revoke", "certificate", req.params.id, { reason: req.body.reason });
@@ -343,6 +382,7 @@ cert.post("/:id/revoke",
 cert.post("/:id/reinstate",
   checkPermission("certificates", "write"),
   validate({ params: idParams }),
+  inAdminDivisions,
   asyncHandler(async (req, res) => {
     await certificates.reinstate(req.params.id, req.admin.id);
     audit(req, "reinstate", "certificate", req.params.id);
@@ -489,6 +529,8 @@ router.get("/audit-logs", checkPermission("audit_logs", "read"), validate({
     entity:   z.string().max(60).optional(),
     action:   z.string().max(60).optional(),
     admin_id: z.coerce.number().int().positive().optional(),
+    from:     z.string().date().optional(),
+    to:       z.string().date().optional(),
     ...sortParams(Object.keys(AUDIT_SORTS), "created_at"),
   }),
 }), asyncHandler(async (req, res) => {
@@ -499,8 +541,18 @@ router.get("/audit-logs", checkPermission("audit_logs", "read"), validate({
     params.push(req.query[key]);
     where.push(`l.${key} = $${params.length}`);
   }
+  // Indian days, as the admin sees them
+  if (req.query.from) {
+    params.push(req.query.from);
+    where.push(`l.created_at >= ($${params.length}::date)::timestamp AT TIME ZONE 'Asia/Kolkata'`);
+  }
+  if (req.query.to) {
+    params.push(req.query.to);
+    where.push(`l.created_at < (($${params.length}::date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata'`);
+  }
   const sqlWhere = where.length ? `WHERE ${where.join(" AND ")}` : "";
-  // The log grows with every admin action: counting stops at COUNT_CAP and older pages are reached through the filters
+  // The log grows with every admin action: counting stops at COUNT_CAP and older entries are reached through the filters
+  // (the dates reach any day)
   assertBrowsable(req.query, "entries");
   const { limit, offset } = paginate(req.query);
   const [list, count] = await Promise.all([

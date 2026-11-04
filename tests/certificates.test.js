@@ -463,11 +463,63 @@ describe("certificate email queue", () => {
     // Two characters of text can match nothing (trigram search needs three)
     assert.equal((await list({ q: "सह" })).body.meta.total, 0);
 
+    // Every filter, alone and combined: the server returns the filtered rows and their count, page by page
+    for (const [query, where] of [
+      [{ state: "valid" }, "c.revoked_at IS NULL"],
+      [{ state: "revoked" }, "c.revoked_at IS NOT NULL"],
+      [{ emailed: "yes" }, "c.emailed_at IS NOT NULL"],
+      [{ emailed: "no" }, "c.emailed_at IS NULL AND r.email IS NOT NULL"],
+      [{ email_status: "none" }, "j.id IS NULL"],
+      [{ email_status: "skipped" }, "j.status = 'skipped'"],
+      [{ email_status: "sent", state: "valid", emailed: "yes" }, "j.status = 'sent' AND c.revoked_at IS NULL AND c.emailed_at IS NOT NULL"],
+    ]) {
+      const ids = await expected(where, []);
+      const all = await list({ ...query, sort: "name", limit: 100 });
+      assert.equal(all.status, 200, JSON.stringify(all.body));
+      assert.deepEqual(all.body.data.map((c) => c.registration_id), ids.slice(0, 100), JSON.stringify(query));
+      assert.equal(all.body.meta.total, ids.length, JSON.stringify(query));
+      const second = await list({ ...query, sort: "name", limit: 2, page: 2 });
+      assert.deepEqual(second.body.data.map((c) => c.registration_id), ids.slice(2, 4), JSON.stringify(query));
+    }
+    assert.equal((await list({ email_status: "unknown" })).status, 400);
+
     const stats = await request(app).get("/api/admin/certificates/email-queue").set(auth());
     assert.equal(stats.status, 200);
     assert.ok(stats.body.data.sent >= 40);
     assert.ok(stats.body.data.failed >= 1);
     assert.equal(stats.body.data.mail_enabled, false);
+  });
+
+  test("each card on the admin page counts exactly the rows it opens", async () => {
+    const cards = async () => {
+      await (await queue.queuePending(null)).done; // also clears the 15 s stats cache
+      const { data } = (await request(app).get("/api/admin/certificates/email-queue").set(auth())).body;
+      for (const status of ["queued", "processing", "sent", "failed", "skipped", "cancelled"]) {
+        assert.equal((await list({ email_status: status })).body.meta.total, data[status], status);
+      }
+      assert.equal((await list({})).body.meta.total, data.total, "All certificates");
+      return data;
+    };
+    const emailed = (await list({ email_status: "sent" })).body.data[0].registration_id;
+    const failed = (await list({ email_status: "failed" })).body.data[0].registration_id;
+    await pool.query(
+      `UPDATE certificate_email_jobs j SET last_error_code = 'RECIPIENT_SMTP_550', recipient = btrim(r.email)
+       FROM certificates c JOIN registrations r ON r.id = c.registration_id
+       WHERE c.id = j.certificate_id AND c.registration_id = $1`,
+      [failed]);
+    const before = await cards();
+    assert.ok(before.total > before.sent);
+
+    // A deleted registration leaves the list, so it leaves the cards as well, and comes back with a restore
+    for (const id of [emailed, failed]) assert.equal((await request(app).delete(`/api/admin/registrations/${id}`).set(auth())).status, 204);
+    const trashed = await cards();
+    assert.deepEqual(
+      [trashed.total, trashed.sent, trashed.failed, trashed.rejected],
+      [before.total - 2, before.sent - 1, before.failed - 1, before.rejected - 1]);
+
+    for (const id of [emailed, failed]) assert.equal((await request(app).post(`/api/admin/registrations/${id}/restore`).set(auth())).status, 200);
+    assert.deepEqual(await cards(), before);
+    await pool.query("UPDATE registrations SET email = 'fixed-' || email WHERE id = $1", [failed]); // no longer a rejected address
   });
 });
 

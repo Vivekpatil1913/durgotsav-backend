@@ -17,10 +17,13 @@ yarn-error.log*
 !.env.example
 
 # Private storage (EXIF/GPS originals, award evidence) — not committed.
-# uploads/ (public site images) IS committed so the server gets the same images.
 storage/originals/*
 !storage/originals/.gitkeep
 storage/award-documents/
+
+# Images the app writes (registration copies, admin uploads). Files committed before
+# this rule stay tracked; new ones are not committed — each server keeps its own.
+uploads/
 
 # Editor
 .vscode/

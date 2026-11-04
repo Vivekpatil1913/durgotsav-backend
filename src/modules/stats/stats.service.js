@@ -149,34 +149,92 @@ const countSorts = (id) => ({
   verified: { cols: `verified, ${id}`, dir: "desc" },
   pending:  { cols: `pending, ${id}`,  dir: "desc" },
   rejected: { cols: `rejected, ${id}`, dir: "desc" },
+  duplicate: { cols: `duplicate, ${id}`, dir: "desc" },
 });
 export const DISTRICT_SORTS = { district: { cols: "district, d.id", dir: "asc" }, ...countSorts("d.id") };
 export const DIVISION_SORTS = { division: { cols: "division, div.id", dir: "asc" }, ...countSorts("div.id") };
 
-// Every district with its counts (one aggregation per scope, cached); sorted and paged in memory.
-// COUNT(r.status), not COUNT(r.id): the same numbers (status is never null), read from the (district_id, status) index
-// alone instead of every registration row.
-const allDistricts = (allowedDivisionIds) => tableCache.get(`districts:${scopeKey(allowedDivisionIds)}`, async () => {
-  const df = divisionFilter("r", allowedDivisionIds);
-  const { rows } = await reportQuery(`
-    SELECT d.id, d.name_mr AS district, d.name_en, d.division_id,
+// Every status has a column, so verified + pending + rejected + duplicate = total ("pending" includes info_requested).
+// COUNT(r.status), not COUNT(r.id): the same numbers (status is never null), read from the (district_id, status) /
+// (division_id, status, …) index alone instead of every registration row.
+const STATUS_COUNTS = `
            COUNT(r.status)::int AS total,
            COUNT(r.status) FILTER (WHERE r.status = 'verified')::int AS verified,
            COUNT(r.status) FILTER (WHERE r.status IN ('pending','info_requested'))::int AS pending,
-           COUNT(r.status) FILTER (WHERE r.status = 'rejected')::int AS rejected
+           COUNT(r.status) FILTER (WHERE r.status = 'rejected')::int AS rejected,
+           COUNT(r.status) FILTER (WHERE r.status = 'duplicate')::int AS duplicate`;
+const COUNT_KEYS = ["total", "verified", "pending", "rejected", "duplicate"];
+// Percentage of the scope's registrations, one decimal
+const shareOf = (n, total) => (total ? Math.round((n * 1000) / total) / 10 : 0);
+
+// Every district of the scope with its counts, plus the registrations that have no district (outside Maharashtra or
+// India), so the rows add up to every registration the admin can see. A deleted district, or one outside the admin's
+// divisions, is listed only while registrations of the scope still point at it: nothing counted is left out.
+async function fetchDistricts(allowedDivisionIds) {
+  const df = divisionFilter("r", allowedDivisionIds);
+  const inScope = allowedDivisionIds === null ? "TRUE"
+    : allowedDivisionIds.length === 0 ? "FALSE"
+    : `d.division_id = ANY(ARRAY[${allowedDivisionIds.map(Number).join(",")}]::int[])`;
+  const { rows } = await reportQuery(`
+    SELECT d.id, d.name_mr AS district, d.name_en, d.sort_order, d.division_id,
+           dv.name_mr AS division, dv.name_en AS division_en, dv.sort_order AS division_sort, ${STATUS_COUNTS}
     FROM districts d
+    LEFT JOIN divisions dv ON dv.id = d.division_id
     LEFT JOIN registrations r ON r.district_id = d.id AND r.deleted_at IS NULL ${df}
-    GROUP BY d.id`);
-  return rows;
-});
+    GROUP BY d.id, dv.id
+    HAVING (d.deleted_at IS NULL AND ${inScope}) OR COUNT(r.status) > 0`);
+  const { rows: [noDistrict] } = await reportQuery(`
+    SELECT ${STATUS_COUNTS} FROM registrations r WHERE r.district_id IS NULL AND r.deleted_at IS NULL ${df}`);
+
+  // Totals and shares over the whole scope, never over one page of rows
+  const summary = Object.fromEntries(COUNT_KEYS.map((k) => [k, rows.reduce((sum, r) => sum + r[k], noDistrict[k])]));
+  return {
+    rows: rows.map((r) => ({ ...r, share: shareOf(r.total, summary.total) })),
+    noDistrict: { ...noDistrict, share: shareOf(noDistrict.total, summary.total) },
+    summary: { ...summary, districts: rows.length, no_district: noDistrict.total },
+  };
+}
+
+const allDistricts = (allowedDivisionIds) =>
+  tableCache.get(`districts:${scopeKey(allowedDivisionIds)}`, () => fetchDistricts(allowedDivisionIds));
 
 export async function districtStats(allowedDivisionIds, { page: p = 1, limit = 10, ...sort } = {}) {
-  return page(sortRows(await allDistricts(allowedDivisionIds), DISTRICT_SORTS, sort, "total"), { page: p, limit });
+  const { rows, summary } = await allDistricts(allowedDivisionIds);
+  return { ...page(sortRows(rows, DISTRICT_SORTS, sort, "total"), { page: p, limit }), summary };
+}
+
+// The district report for export: read now, not from the cache, so the file matches the registrations at this moment.
+// Districts are grouped under their division in the admin's order, each division with its subtotal; the subtotals of
+// the divisions plus the no-district row add up to the grand total.
+export async function districtReport(allowedDivisionIds) {
+  const { rows, noDistrict, summary } = await fetchDistricts(allowedDivisionIds);
+  const divisions = new Map();
+  for (const r of rows) {
+    const key = r.division_id ?? 0;
+    if (!divisions.has(key)) {
+      divisions.set(key, {
+        id: r.division_id, division: r.division ?? "(No division)", division_en: r.division_en ?? "", sort: r.division_sort ?? Infinity,
+        districts: [], ...Object.fromEntries(COUNT_KEYS.map((k) => [k, 0])),
+      });
+    }
+    const div = divisions.get(key);
+    div.districts.push(r);
+    for (const k of COUNT_KEYS) div[k] += r[k];
+  }
+  const byOrder = (a, b) => a.sort - b.sort || String(a.division_en).localeCompare(String(b.division_en));
+  return {
+    divisions: [...divisions.values()].sort(byOrder).map((div) => ({
+      ...div,
+      share: shareOf(div.total, summary.total),
+      districts: div.districts.sort((a, b) => a.sort_order - b.sort_order || a.name_en.localeCompare(b.name_en)),
+    })),
+    noDistrict,
+    summary,
+  };
 }
 
 // ── divisionStats ────────────────────────────────────────────────────────────
-// A handful of rows per scope — cached whole, paged in memory. COUNT(r.status) as above: index-only on the
-// (division_id, status, …) index.
+// A handful of rows per scope — cached whole, paged in memory. STATUS_COUNTS as above; shares are of all the divisions.
 
 const allDivisions = (allowedDivisionIds) => tableCache.get(`divisions:${scopeKey(allowedDivisionIds)}`, async () => {
   const df = divisionFilter("r", allowedDivisionIds);
@@ -184,16 +242,13 @@ const allDivisions = (allowedDivisionIds) => tableCache.get(`divisions:${scopeKe
     : allowedDivisionIds.length === 0 ? "AND FALSE"
     : `AND div.id = ANY(ARRAY[${allowedDivisionIds.map(Number).join(",")}]::int[])`;
   const { rows } = await reportQuery(`
-    SELECT div.id, div.name_mr AS division, div.name_en,
-           COUNT(r.status)::int AS total,
-           COUNT(r.status) FILTER (WHERE r.status = 'verified')::int AS verified,
-           COUNT(r.status) FILTER (WHERE r.status IN ('pending','info_requested'))::int AS pending,
-           COUNT(r.status) FILTER (WHERE r.status = 'rejected')::int AS rejected
+    SELECT div.id, div.name_mr AS division, div.name_en, ${STATUS_COUNTS}
     FROM divisions div
     LEFT JOIN registrations r ON r.division_id = div.id AND r.deleted_at IS NULL ${df}
     WHERE div.deleted_at IS NULL ${divScope}
     GROUP BY div.id`);
-  return rows;
+  const total = rows.reduce((sum, r) => sum + r.total, 0);
+  return rows.map((r) => ({ ...r, share: shareOf(r.total, total) }));
 });
 
 export async function divisionStats(allowedDivisionIds, { page: p = 1, limit = 10, ...sort } = {}) {

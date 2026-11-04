@@ -7,7 +7,7 @@ import PDFDocument from "pdfkit";
 import { paths } from "../../config/paths.js";
 import { CATEGORIES, STATUSES, workLabel } from "./award.constants.js";
 
-const istDateTime = new Intl.DateTimeFormat("en-IN", {
+export const istDateTime = new Intl.DateTimeFormat("en-IN", {
   timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
 });
 
@@ -44,7 +44,7 @@ const csvCell = (v) => {
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 };
 
-const csvLine = (cells) => `${cells.map(csvCell).join(",")}\r\n`;
+export const csvLine = (cells) => `${cells.map(csvCell).join(",")}\r\n`;
 
 // A download that takes nothing for this long is cut off: the export's database cursor (a pooled connection and an open
 // transaction) must not wait on a stalled client, and the server ends an idle transaction at 120 s anyway
@@ -95,11 +95,11 @@ export function csvWriter(sink) {
 
 // ---------------------------------------------------------------- XLSX (minimal OOXML package, inline strings, streamed)
 
-const xmlEsc = (s) => String(s ?? "")
+export const xmlEsc = (s) => String(s ?? "")
   .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "")
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-const colName = (i) => {
+export const colName = (i) => {
   let s = "";
   for (let n = i + 1; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s;
   return s;
@@ -113,7 +113,7 @@ const deflateRaw = promisify(zlib.deflateRaw);
  * deflated independently with a sync flush (non-final blocks that concatenate into one valid deflate stream) and its
  * CRC/sizes follow in a data descriptor, so nothing has to be held in memory.
  */
-function zipWriter(sink) {
+export function zipWriter(sink) {
   const central = [];
   let offset = 0;
   const emit = async (buf) => { offset += buf.length; await sink.write(buf); };
@@ -210,7 +210,7 @@ const XLSX_STATIC = (sheetName) => [
 
 const XLSX_WIDTHS = [18, 16, 30, 13, 26, 24, 14, 16, 16, 40, 12, 26, 20];
 
-const sheetRow = (cells, rowNo, style = "") => `<row r="${rowNo}">${cells.map((v, ci) => {
+export const sheetRow = (cells, rowNo, style = "") => `<row r="${rowNo}">${cells.map((v, ci) => {
   const ref = `${colName(ci)}${rowNo}`;
   return typeof v === "number"
     ? `<c r="${ref}"${style}><v>${v}</v></c>`
