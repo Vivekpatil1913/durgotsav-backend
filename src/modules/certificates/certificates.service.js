@@ -265,10 +265,15 @@ function search(text, params) {
   return { ids: `ARRAY(${lookups.map((sql) => `(${sql} LIMIT ${COUNT_CAP + 1})`).join(" UNION ")})`, test: `(${tests.join(" OR ")})` };
 }
 
-export async function adminList(f) {
+// allowedDivisionIds: the admin's divisions (null = all); the search and every filter below stay inside them
+export async function adminList(f, allowedDivisionIds = null) {
   assertBrowsable(f, "certificates");
   const where = ["r.deleted_at IS NULL"];
   const params = [];
+  if (allowedDivisionIds !== null) {
+    params.push(allowedDivisionIds);
+    where.push(`r.division_id = ANY($${params.length}::int[])`);
+  }
   if (f.state === "valid") where.push("c.revoked_at IS NULL");
   if (f.state === "revoked") where.push("c.revoked_at IS NOT NULL");
   if (f.emailed === "yes") where.push("c.emailed_at IS NOT NULL");
@@ -284,8 +289,12 @@ export async function adminList(f) {
   // Counting joins the email job only when a filter reads it
   const from = `FROM certificates c JOIN registrations r ON r.id = c.registration_id${f.email_status ? " LEFT JOIN certificate_email_jobs j ON j.certificate_id = c.id" : ""}`;
   const { limit, offset } = paginate(f);
-  const page = (condition) =>
-    query(`${CERT_SELECT} WHERE ${condition} ORDER BY ${sortSql(ADMIN_SORTS, f, "issued_at")} LIMIT ${limit} OFFSET ${offset}`, params);
+  const sort = sortSql(ADMIN_SORTS, f, "issued_at");
+  // The page's ids are picked first and only those rows are joined to the district, photo and email job
+  const page = (condition) => query(
+    `${CERT_SELECT} WHERE c.id = ANY(ARRAY(SELECT c.id ${from} WHERE ${condition} ORDER BY ${sort} LIMIT ${limit} OFFSET ${offset})) ORDER BY ${sort}`,
+    params,
+  );
 
   let list;
   let count;
@@ -387,7 +396,7 @@ export async function resend(registrationId, adminId) {
 // Resolves to { done } once this run holds the lock (409 ALREADY_RUNNING while another run goes on); see the queue
 export const queuePending = (adminId) => emailQueue.queuePending(adminId);
 export const retryFailed = (adminId, options) => emailQueue.retryFailed(adminId, options);
-export const emailQueueStats = () => emailQueue.queueStats();
+export const emailQueueStats = (allowedDivisionIds = null) => emailQueue.queueStats(allowedDivisionIds);
 
 export async function deliveryLog(registrationId) {
   await adminGet(registrationId);

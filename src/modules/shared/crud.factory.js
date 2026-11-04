@@ -5,7 +5,8 @@ import { authorize } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validate.js";
 import { audit } from "../../services/audit.service.js";
 import { asyncHandler, badRequest, notFound } from "../../utils/errors.js";
-import { paginate, pageMeta, paginationSchema, sortParams, sortSql } from "../../utils/pagination.js";
+import { likeContains } from "../../utils/format.js";
+import { assertBrowsable, cappedCount, cappedMeta, paginate, pageMeta, paginationSchema, sortParams, sortSql } from "../../utils/pagination.js";
 
 // Ids are INTEGER columns: a larger number in a hand-edited URL is a 400, never a value SQL cannot hold
 const INT_MAX = 2_147_483_647;
@@ -61,6 +62,7 @@ export function createCrud(cfg) {
 
   const service = {
     async list(f) {
+      assertBrowsable(f, "records");
       const where = [softDelete ? (f.trashed ? "deleted_at IS NOT NULL" : "deleted_at IS NULL") : "TRUE"];
       const params = [];
       for (const key of Object.keys(filters)) {
@@ -69,16 +71,16 @@ export function createCrud(cfg) {
         where.push(`${key} = $${params.length}`);
       }
       if (f.q && searchable.length) {
-        params.push(`%${f.q}%`);
+        params.push(likeContains(f.q));
         where.push(`(${searchable.map((c) => `${c}::text ILIKE $${params.length}`).join(" OR ")})`);
       }
       const { limit, offset } = paginate(f);
       const sqlWhere = `WHERE ${where.join(" AND ")}`;
       const [rows, count] = await Promise.all([
         query(`SELECT * FROM ${table} ${sqlWhere} ORDER BY ${f.sort ? sortSql(sorts, f) : order} LIMIT ${limit} OFFSET ${offset}`, params),
-        query(`SELECT COUNT(*)::int AS total FROM ${table} ${sqlWhere}`, params),
+        cappedCount(query, `FROM ${table} ${sqlWhere}`, params),
       ]);
-      return { data: rows.rows, meta: pageMeta(f, count.rows[0].total) };
+      return { data: rows.rows, meta: cappedMeta(f, count) };
     },
 
     async get(id) {

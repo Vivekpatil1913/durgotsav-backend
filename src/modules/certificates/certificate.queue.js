@@ -286,27 +286,75 @@ export async function loadForDelivery(certificateId) {
 
 // Queue health for the admin page. Counting per status reads the whole queue (seconds at millions of jobs), so it runs
 // on the report pool, once per 15 s however many admins watch (utils/cache.js); the bulk tools above clear it.
+// Each count opens as a list of exactly that many rows, and the admin list leaves out deleted registrations: they are
+// read from the trash (its own small index) and subtracted, in one statement so both sides see the same moment. Joining
+// every job to its registration instead would read three whole tables.
 // rejected: the failed jobs a plain "Retry failed" leaves alone (address refused and not corrected since), read from
 // the failed ones only.
 const statsCache = createCache({ ttlMs: 15_000, name: "email-queue" });
-export const queueStats = () => statsCache.get("all", countQueue);
+// null = every division; otherwise the admin's divisions, cached per set of divisions
+export const queueStats = (allowedDivisionIds = null) => (allowedDivisionIds === null
+  ? statsCache.get("all", countQueue)
+  : statsCache.get([...allowedDivisionIds].sort((a, b) => a - b).join(",") || "none", () => countDivisions(allowedDivisionIds)));
+
+const TRASHED_CERTIFICATES = "registrations r JOIN certificates c ON c.registration_id = r.id";
 
 async function countQueue() {
   const [byStatus, timing] = await Promise.all([
-    reportQuery("SELECT status, COUNT(*)::int AS count FROM certificate_email_jobs GROUP BY status"),
+    reportQuery(
+      `SELECT status, SUM(count)::int AS count FROM (
+         SELECT status, COUNT(*) AS count FROM certificate_email_jobs GROUP BY status
+         UNION ALL
+         SELECT j.status, -COUNT(*) FROM ${TRASHED_CERTIFICATES} JOIN certificate_email_jobs j ON j.certificate_id = c.id
+         WHERE r.deleted_at IS NOT NULL GROUP BY j.status
+       ) jobs GROUP BY status`,
+    ),
     reportQuery(
       `SELECT
+         (SELECT COUNT(*)::int FROM certificates)
+           - (SELECT COUNT(*)::int FROM ${TRASHED_CERTIFICATES} WHERE r.deleted_at IS NOT NULL) AS total,
          (SELECT MIN(run_at) FROM certificate_email_jobs WHERE status = 'queued') AS next_run_at,
          (SELECT COUNT(*)::int FROM certificate_email_jobs WHERE status = 'queued' AND run_at <= NOW()) AS due_now,
          (SELECT COUNT(*)::int FROM certificate_email_log WHERE outcome = 'sent' AND created_at > NOW() - INTERVAL '1 hour') AS sent_last_hour,
          (SELECT MAX(created_at) FROM certificate_email_log) AS last_activity_at,
          (SELECT COUNT(*)::int FROM certificate_email_jobs j JOIN certificates c ON c.id = j.certificate_id
-            JOIN registrations r ON r.id = c.registration_id WHERE ${REJECTED_ADDRESS}) AS rejected`,
+            JOIN registrations r ON r.id = c.registration_id WHERE ${REJECTED_ADDRESS} AND r.deleted_at IS NULL) AS rejected`,
     ),
   ]);
   const counts = { queued: 0, processing: 0, sent: 0, failed: 0, skipped: 0, cancelled: 0 };
   for (const r of byStatus.rows) counts[r.status] = r.count;
   return { ...counts, ...timing.rows[0] };
+}
+
+// The same figures for some divisions: certificates of their live registrations only, so each card counts exactly the
+// rows it opens in that admin's list
+async function countDivisions(divisionIds) {
+  const logged = `FROM certificate_email_log l JOIN certificates c ON c.id = l.certificate_id
+    JOIN registrations r ON r.id = c.registration_id WHERE r.deleted_at IS NULL AND r.division_id = ANY($1::int[])`;
+  const [jobs, log] = await Promise.all([
+    reportQuery(
+      `SELECT COUNT(*)::int AS total,
+         COUNT(*) FILTER (WHERE j.status = 'queued')::int AS queued,
+         COUNT(*) FILTER (WHERE j.status = 'processing')::int AS processing,
+         COUNT(*) FILTER (WHERE j.status = 'sent')::int AS sent,
+         COUNT(*) FILTER (WHERE j.status = 'failed')::int AS failed,
+         COUNT(*) FILTER (WHERE j.status = 'skipped')::int AS skipped,
+         COUNT(*) FILTER (WHERE j.status = 'cancelled')::int AS cancelled,
+         MIN(j.run_at) FILTER (WHERE j.status = 'queued') AS next_run_at,
+         COUNT(*) FILTER (WHERE j.status = 'queued' AND j.run_at <= NOW())::int AS due_now,
+         COUNT(*) FILTER (WHERE ${REJECTED_ADDRESS})::int AS rejected
+       FROM registrations r JOIN certificates c ON c.registration_id = r.id
+       LEFT JOIN certificate_email_jobs j ON j.certificate_id = c.id
+       WHERE r.deleted_at IS NULL AND r.division_id = ANY($1::int[])`,
+      [divisionIds],
+    ),
+    reportQuery(
+      `SELECT (SELECT COUNT(*)::int ${logged} AND l.outcome = 'sent' AND l.created_at > NOW() - INTERVAL '1 hour') AS sent_last_hour,
+              (SELECT l.created_at ${logged} ORDER BY l.created_at DESC LIMIT 1) AS last_activity_at`,
+      [divisionIds],
+    ),
+  ]);
+  return { ...jobs.rows[0], ...log.rows[0] };
 }
 
 export async function deliveryLog(registrationId, limit = 50) {

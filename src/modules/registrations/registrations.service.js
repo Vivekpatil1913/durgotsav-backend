@@ -278,7 +278,7 @@ export async function register(input, files, meta) {
     });
   }
   const [file, file2] = files;
-  if (!file) throw badRequest("Please upload a photo of you with your fort replica", { photo: "Photo is required" });
+  if (!file) throw badRequest("Please upload a selfie with your fort replica or a photograph of the fort replica", { photo: "Photo is required" });
   const { division_id } = await assertReferences(input);
 
   const prepared = await prepareParticipantPhoto(file);
@@ -462,8 +462,9 @@ function buildFilters(f, allowedDivisionIds) {
   if (f.taluka_id)        add("r.taluka_id = ?",        f.taluka_id);
   if (f.fort_id)          add("r.fort_id = ?",          f.fort_id);
   if (f.participant_type) add("r.participant_type = ?",  f.participant_type);
-  if (f.from)             add("r.created_at >= ?::date", f.from);
-  if (f.to)               add("r.created_at < (?::date + 1)", f.to);
+  // Indian days, as the admin sees them, whatever the database's time zone
+  if (f.from)             add("r.created_at >= (?::date)::timestamp AT TIME ZONE 'Asia/Kolkata'", f.from);
+  if (f.to)               add("r.created_at < ((?::date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata'", f.to);
   if (f.duplicates === true) where.push("p.duplicate_of_photo_id IS NOT NULL");
   if (f.featured === true) where.push("p.is_featured");
   if (f.featured === false) where.push("p.is_featured IS NOT TRUE");
@@ -504,25 +505,25 @@ const countFrom = (f, where) => `FROM registrations r ${needsPhoto(f) ? PHOTO_JO
  * One page of the admin list, and how many records match (counting stops at COUNT_CAP; pages past it are not browsed).
  * The page's ids are picked from the registrations alone, and only those rows are joined to names, photo and
  * certificate: a deep page skips its OFFSET rows on the indexes instead of joining every one of them.
- * A search is counted first: a narrow one (under the cap) collects its matches once through the trigram indexes
- * (ARRAY(…): computed first, whatever the planner estimates) and only those are sorted; a broad one has matches so
- * dense that walking the sort index finds a page at once.
+ * A search reads the trigram indexes once, however many rows it must recheck: its matching ids (up to just past the
+ * cap) give the count and, for a narrow search, the only rows to sort. A broad one has matches so dense that walking
+ * the sort index finds a page at once.
  */
 export async function adminList(filters, allowedDivisionIds) {
   assertBrowsable(filters, "registrations");
   const { where, params, search } = buildFilters(filters, allowedDivisionIds);
   const { limit, offset } = paginate(filters);
   const sort = sortSql(SORTS, sortOf(filters), "created_at");
-  const page = (from) => query(
+  const page = (from, values = params) => query(
     `${SELECT_LIST} WHERE r.id = ANY(ARRAY(SELECT r.id ${from} ORDER BY ${sort} LIMIT ${limit} OFFSET ${offset})) ORDER BY ${sort}`,
-    params,
+    values,
   );
   let rows;
   let count;
   if (search) {
-    count = await cappedCount(query, countFrom(filters, where), params);
-    const matches = `FROM registrations r WHERE r.id = ANY(ARRAY(SELECT r.id ${countFrom(filters, where)}))`;
-    ({ rows } = await page(count.capped ? countFrom(filters, where) : matches));
+    const { rows: [{ ids }] } = await query(`SELECT ARRAY(SELECT r.id ${countFrom(filters, where)} LIMIT ${COUNT_CAP + 1}) AS ids`, params);
+    count = { total: Math.min(ids.length, COUNT_CAP), capped: ids.length > COUNT_CAP };
+    ({ rows } = await (count.capped ? page(countFrom(filters, where)) : page("FROM registrations r WHERE r.id = ANY($1::int[])", [ids])));
   } else {
     [{ rows }, count] = await Promise.all([page(countFrom(filters, where)), cappedCount(query, countFrom(filters, where), params)]);
   }
@@ -580,6 +581,8 @@ const EXPORT_BATCH = 1000;
  * continues after the last registration number of the one before, so a slow download holds no connection, transaction
  * or snapshot between batches, however long the file. The number never changes, so a record edited during the download
  * (its status, name or mobile) is still written exactly once — which a cursor on an editable column could not promise.
+ * A batch's ids are picked from the registrations alone and only those rows are joined: joined whole, the planner merges
+ * with the photo and certificate indexes from their first entry, so each batch would cost more than the one before.
  */
 export async function* adminExportStream(filters, allowedDivisionIds) {
   const { where, params } = buildFilters(filters, allowedDivisionIds);
@@ -587,7 +590,7 @@ export async function* adminExportStream(filters, allowedDivisionIds) {
   let last = null;
   for (;;) {
     const { rows } = await query(
-      `${SELECT_LIST} ${where} ${last === null ? "" : after} ORDER BY r.id LIMIT ${EXPORT_BATCH}`,
+      `${SELECT_LIST} WHERE r.id = ANY(ARRAY(SELECT r.id ${countFrom(filters, where)} ${last === null ? "" : after} ORDER BY r.id LIMIT ${EXPORT_BATCH})) ORDER BY r.id`,
       last === null ? params : [...params, last],
     );
     if (rows.length) yield rows.map(decorate);

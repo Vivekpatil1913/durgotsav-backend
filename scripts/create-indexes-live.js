@@ -243,6 +243,16 @@ const STEPS = [
     sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS certificate_email_jobs_failed_idx
           ON certificate_email_jobs (id) WHERE status = 'failed'`,
   },
+  // mirrors migrations/041_admin_list_indexes.sql
+  {
+    label: "audit_logs_created_id_idx (audit log — date filter)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_logs_created_id_idx ON audit_logs (created_at, id)`,
+  },
+  {
+    label: "contact_enquiries_recent_idx (contact enquiries — newest first)",
+    sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS contact_enquiries_recent_idx
+          ON contact_enquiries (created_at DESC, id DESC) WHERE deleted_at IS NULL`,
+  },
 ];
 
 // Superseded by the indexes above (migration 036 lists what replaces each). Dropped CONCURRENTLY, and only once every

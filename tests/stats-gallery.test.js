@@ -359,6 +359,98 @@ describe("admin statistics", () => {
     assert.equal(cities.reduce((sum, c) => sum + c.registrations, 0), live.total);
     assert.equal(cities.reduce((sum, c) => sum + c.uploaded, 0), live.total, "every registration has its main photo");
   });
+
+  test("district counts add up per status, with no-district registrations and server-side shares", async () => {
+    // One duplicate and one registration from outside Maharashtra, put back afterwards
+    const { rows: [dup, away] } = await sql(`
+      SELECT id, status, district_id, division_id FROM registrations
+      WHERE deleted_at IS NULL AND status <> 'duplicate' AND district_id IS NOT NULL ORDER BY id LIMIT 2`);
+    await sql("UPDATE registrations SET status = 'duplicate' WHERE id = $1", [dup.id]);
+    await sql("UPDATE registrations SET district_id = NULL, division_id = NULL WHERE id = $1", [away.id]);
+    try {
+      stats.invalidateStatsCache();
+      const { rows: [live] } = await sql(`
+        SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE district_id IS NULL)::int AS no_district,
+               COUNT(*) FILTER (WHERE status = 'verified')::int AS verified,
+               COUNT(*) FILTER (WHERE status IN ('pending', 'info_requested'))::int AS pending,
+               COUNT(*) FILTER (WHERE status = 'rejected')::int AS rejected,
+               COUNT(*) FILTER (WHERE status = 'duplicate')::int AS duplicate
+        FROM registrations WHERE deleted_at IS NULL`);
+      // A page of 5 still carries the totals of the whole scope
+      const { body: { data } } = await request(app).get("/api/admin/stats/districts?limit=5").set(auth());
+      assert.equal(data.items.length, 5);
+      assert.deepEqual(
+        { total: data.summary.total, no_district: data.summary.no_district, verified: data.summary.verified,
+          pending: data.summary.pending, rejected: data.summary.rejected, duplicate: data.summary.duplicate },
+        live);
+      const { body: { data: all } } = await request(app).get("/api/admin/stats/districts?limit=100").set(auth());
+      for (const d of all.items) assert.equal(d.verified + d.pending + d.rejected + d.duplicate, d.total, d.name_en);
+      assert.equal(all.items.reduce((sum, d) => sum + d.total, 0) + all.summary.no_district, live.total);
+      const top = all.items[0];
+      assert.equal(top.share, Math.round((top.total * 1000) / live.total) / 10);
+      assert.equal(data.items[0].share, top.share, "the share does not depend on the page");
+      const bySort = (await request(app).get("/api/admin/stats/districts?limit=1&sort=duplicate&dir=desc").set(auth())).body.data.items;
+      assert.ok(bySort[0].duplicate >= 1);
+    } finally {
+      await sql("UPDATE registrations SET status = $2 WHERE id = $1", [dup.id, dup.status]);
+      await sql("UPDATE registrations SET district_id = $2, division_id = $3 WHERE id = $1", [away.id, away.district_id, away.division_id]);
+      stats.invalidateStatsCache();
+    }
+  });
+
+  test("a scoped admin's district table lists only their divisions' districts", async () => {
+    stats.invalidateStatsCache();
+    const { body: { data } } = await request(app).get("/api/admin/stats/districts?limit=100").set(asMod());
+    const { rows: [live] } = await sql("SELECT COUNT(*)::int AS total FROM registrations WHERE deleted_at IS NULL AND division_id = 5");
+    const { rows: [own] } = await sql("SELECT COUNT(*)::int AS n FROM districts WHERE deleted_at IS NULL AND division_id = 5");
+    assert.ok(data.items.every((d) => d.division_id === 5), "no other division's districts");
+    assert.equal(data.items.length, own.n);
+    assert.equal(data.summary.total, live.total);
+    assert.equal(data.summary.no_district, 0);
+  });
+
+  test("the district export is division and district wise and adds up to the live registrations", async () => {
+    const { rows: [live] } = await sql(`
+      SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE division_id = 5)::int AS division
+      FROM registrations WHERE deleted_at IS NULL`);
+    const csv = await request(app).get("/api/admin/stats/districts/export.csv").set(auth());
+    assert.equal(csv.status, 200);
+    assert.match(csv.headers["content-type"], /text\/csv/);
+    assert.match(csv.headers["content-disposition"], /district-stats\.csv/);
+    const lines = csv.text.replace(/^﻿/, "").split("\r\n").map((l) => l.split(","));
+    assert.equal(lines[0][1], "Division");
+    const districtRows = lines.filter((l) => /^\d+$/.test(l[0]));
+    const subtotals = lines.filter((l) => l[3] === "Division total");
+    const noDistrict = lines.find((l) => l[3] === "No district");
+    const grand = lines.find((l) => l[3] === "Grand total");
+    assert.equal(Number(grand[5]), live.total);
+    assert.equal(districtRows.reduce((s, l) => s + Number(l[5]), 0) + Number(noDistrict[5]), live.total);
+    assert.equal(subtotals.reduce((s, l) => s + Number(l[5]), 0) + Number(noDistrict[5]), live.total);
+    const { rows: [div5] } = await sql("SELECT name_en FROM divisions WHERE id = 5");
+    assert.equal(Number(subtotals.find((l) => l[2] === div5.name_en)[5]), live.division);
+
+    const xlsx = await request(app).get("/api/admin/stats/districts/export.xlsx").set(auth())
+      .buffer(true).parse((res, cb) => { const c = []; res.on("data", (d) => c.push(d)); res.on("end", () => cb(null, Buffer.concat(c))); });
+    assert.equal(xlsx.status, 200);
+    assert.match(xlsx.headers["content-type"], /spreadsheetml/);
+    assert.equal(xlsx.body.subarray(0, 2).toString(), "PK");
+    assert.ok(xlsx.body.includes(Buffer.from("xl/worksheets/sheet2.xml")), "district-wise and division-wise sheets");
+
+    // Exports need reports:write, like every other export; a scoped admin's file holds only their divisions
+    assert.equal((await request(app).get("/api/admin/stats/districts/export.csv").set(asMod())).status, 403);
+    await sql(`UPDATE roles SET permissions = permissions || '{"reports": {"read": true, "write": true}}' WHERE slug = 'moderator'`);
+    try {
+      const scoped = await request(app).get("/api/admin/stats/districts/export.csv").set(asMod());
+      assert.equal(scoped.status, 200);
+      const scopedGrand = scoped.text.split("\r\n").find((l) => l.includes("Grand total")).split(",");
+      assert.equal(Number(scopedGrand[5]), live.division);
+    } finally {
+      await sql("UPDATE roles SET permissions = permissions - 'reports' WHERE slug = 'moderator'");
+    }
+
+    assert.equal((await request(app).get("/api/admin/stats/districts/export.pdf").set(auth())).status, 400);
+    assert.equal((await request(app).get("/api/admin/stats/districts/export.csv")).status, 401);
+  });
 });
 
 describe("visitor counter", () => {
