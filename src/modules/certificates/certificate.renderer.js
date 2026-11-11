@@ -14,26 +14,23 @@ const FONT = path.join(paths.certificateAssets, "NotoSansDevanagari.ttf");
 // (same letter shapes, stroke weight within 2 %, Devanagari + Latin).
 const NAME_FONT = path.join(paths.certificateAssets, "Mukta-SemiBold.ttf");
 
-// Coordinates are PDF points of the 2026 design ("Durgotsav Certificate Sign.pdf", 1200×855.75 pt).
-// template.jpg is that PDF rendered at 2× (2400×1712), which the designer supplied with the photo area and the
-// दुर्गवीर number left empty; it is drawn scaled down to the page size, so it stays sharp when printed.
+// Coordinates are PDF points of the 2026 design ("Durgotsav Certificate.. (1).pdf" of 11 Nov 2026, 1200×855.75 pt).
+// template.jpg is that PDF rendered at 2× (2400×1712, sharp JPEG quality 92 mozjpeg), which the designer supplied
+// with the photo area and the दुर्गवीर number left empty; it is drawn scaled down to the page size, so it stays sharp
+// when printed.
 // The year is part of the artwork ("दुर्गोत्सव २०२६ मध्ये"): a new edition needs that year's template.jpg.
 const TEMPLATE = {
   file: path.join(paths.certificateAssets, "template.jpg"),
   width: 1200,
   height: 855.75,
-  // Blank line before "आपण सक्रिय सहभाग". Its rule (y 549–551.5) is one line pitch (36 pt, the paragraph's is 37.3)
-  // below the sentence above, so the name sits ON the rule as the next line of the paragraph: baseline just above it,
-  // leaving 11–13 pt to the sentence above, like the paragraph's own 10 pt between lines.
+  // Empty space before "आपण सक्रिय सहभाग" (this design has no rule there). The name ends one word space before
+  // "आपण" (x 733.5) on that sentence's baseline (553.9), so "<name> आपण सक्रिय सहभाग" reads as one line of the
+  // paragraph; centred in the space, short names would leave a wide gap before "आपण".
   // Mukta at 21.2 pt has the same letter height as the sentence's Utsaah Bold at 27.82 pt (Utsaah is drawn small for
   // its point size); the name is 10 % larger (23.3 pt) so it stands out.
   // Long names first get smaller down to minSize, then narrower down to minScaling %, and only names far beyond
   // normal length go smaller still.
-  // rule: where hanging vowel signs (ु ू ृ) cross it, the rule is broken around them in the paper colour (skip-ink).
-  nameLine: {
-    x: 318, width: 398, baseline: 547, size: 23.3, minSize: 16.5, minScaling: 80,
-    rule: { top: 548.5, height: 3.5, paper: "#ECE8E3", gap: 1.3 },
-  },
+  nameLine: { x: 318, width: 410, baseline: 554, size: 23.3, minSize: 16.5, minScaling: 80 },
   // empty area above "मी आणि माझा दुर्ग", grown upward into the free paper so portrait photos print at a readable size
   photo: { x: 124, y: 610, width: 161, height: 137.5, radius: 6 },
   // after "दुर्गवीर क्र." (same baseline); free paper up to the seal at x≈495, so longer numbers only shrink past maxWidth
@@ -64,6 +61,9 @@ function fitToLine(widthAt, { width, size, minSize, minScaling }) {
   while (s > 4 && widthAt(s, scaling) > width) s -= 0.25;
   return { size: s, scaling, width: widthAt(s, scaling) };
 }
+
+// Left edge of the fitted name: it ends where the name space ends, just before "आपण"
+const nameStart = (fit) => TEMPLATE.nameLine.x + TEMPLATE.nameLine.width - fit.width;
 
 // Everything printed on the certificate besides the artwork, in one place for the PDF and the image
 function printedText(cert) {
@@ -114,25 +114,17 @@ function drawPage(doc, cert, photo) {
   const text = printedText(cert);
   doc.image(templateImage(doc), 0, 0, { width: t.width, height: t.height });
 
-  // Name centred on the blank line, a little larger than the sentence around it; long names are fitted to the line.
+  // Name right before "आपण सक्रिय सहभाग", a little larger than the sentence around it; long names are fitted to the
+  // space.
   // Narrowing is a transform, not pdfkit's horizontalScaling: pdfkit re-positions Devanagari text after every
   // positioned vowel sign without that scaling, which would leave gaps and push the name past the line.
   const { name } = cert;
   doc.font("name");
   const fit = fitToLine((s, scaling = 100) => doc.fontSize(s).widthOfString(name, { horizontalScaling: scaling }), t.nameLine);
-  const nameX = t.nameLine.x + (t.nameLine.width - fit.width) / 2;
-  const nameOptions = { baseline: "alphabetic", lineBreak: false };
-  const { rule } = t.nameLine;
+  const nameX = nameStart(fit);
   doc.save();
   if (fit.scaling !== 100) doc.scale(fit.scaling / 100, 1, { origin: [nameX, t.nameLine.baseline] });
-  doc.fontSize(fit.size);
-  // Skip-ink: a paper-coloured outline of the name, clipped to the rule's band, opens a small gap in the rule
-  // wherever a hanging vowel sign crosses it; nothing outside that band is touched
-  doc.save().rect(0, rule.top, t.width, rule.height).clip();
-  doc.lineWidth(rule.gap * 2).lineJoin("round").strokeColor(rule.paper).fillColor(rule.paper)
-    .text(name, nameX, t.nameLine.baseline, { ...nameOptions, fill: true, stroke: true });
-  doc.restore();
-  doc.fillColor(NAME_COLOR).text(name, nameX, t.nameLine.baseline, nameOptions);
+  doc.fontSize(fit.size).fillColor(NAME_COLOR).text(name, nameX, t.nameLine.baseline, { baseline: "alphabetic", lineBreak: false });
   doc.restore();
   doc.font("deva");
 
@@ -238,8 +230,7 @@ export async function renderCertificateImage(cert, { requirePhoto = false, quali
   const H = Math.round(t.height * SCALE);
 
   const fit = fitToLine((s, scaling = 100) => widthOf(glyphs.name, cert.name, s, scaling), t.nameLine);
-  const nameD = textPath(glyphs.name, cert.name, { x: t.nameLine.x + (t.nameLine.width - fit.width) / 2, baseline: t.nameLine.baseline, size: fit.size, scaling: fit.scaling });
-  const { rule } = t.nameLine;
+  const nameD = textPath(glyphs.name, cert.name, { x: nameStart(fit), baseline: t.nameLine.baseline, size: fit.size, scaling: fit.scaling });
 
   let numberSize = t.durgveerNo.size;
   while (numberSize > 10 && widthOf(glyphs.deva, text.durgveer, numberSize) > t.durgveerNo.maxWidth) numberSize -= 0.5;
@@ -247,8 +238,6 @@ export async function renderCertificateImage(cert, { requirePhoto = false, quali
   const certNoWidth = widthOf(glyphs.deva, text.certNo, t.certNo.size);
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
-    <defs><clipPath id="rule"><rect x="0" y="${px(rule.top)}" width="${W}" height="${px(rule.height)}"/></clipPath></defs>
-    <path d="${nameD}" clip-path="url(#rule)" fill="${rule.paper}" stroke="${rule.paper}" stroke-width="${px(rule.gap * 2)}" stroke-linejoin="round"/>
     <path d="${nameD}" fill="${NAME_COLOR}"/>
     <path d="${textPath(glyphs.deva, text.durgveer, { x: t.durgveerNo.x, baseline: t.durgveerNo.baseline, size: numberSize })}" fill="#000" stroke="#000" stroke-width="${px(0.45)}"/>
     <path d="${textPath(glyphs.deva, text.certNo, { x: (t.width - certNoWidth) / 2, baseline: t.certNo.baseline, size: t.certNo.size })}" fill="${CERT_NO_COLOR}"/>

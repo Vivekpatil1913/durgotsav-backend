@@ -31,7 +31,8 @@ describe("certificate layout", () => {
 
   test("the name and the certificate number are still printed", async () => {
     const image = await renderCertificateImage(cert);
-    const name = await printedPixels(image, { left: 636, top: 1040, width: 796, height: 60 });
+    // x 318–728 pt, y 530–562 pt at 2×: the space before "आपण सक्रिय सहभाग", around the name's baseline (554 pt)
+    const name = await printedPixels(image, { left: 636, top: 1060, width: 820, height: 64 });
     const footer = await printedPixels(image, { left: 600, top: 1650, width: 1200, height: 40 });
     assert.ok(name > 500, `name line: ${name} printed pixels`);
     assert.ok(footer > 500, `certificate number: ${footer} printed pixels`);
