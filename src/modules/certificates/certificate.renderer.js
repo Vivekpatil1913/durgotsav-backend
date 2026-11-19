@@ -23,9 +23,9 @@ const TEMPLATE = {
   file: path.join(paths.certificateAssets, "template.jpg"),
   width: 1200,
   height: 855.75,
-  // Empty space before "आपण सक्रिय सहभाग" (this design has no rule there). The name ends one word space before
-  // "आपण" (x 733.5) on that sentence's baseline (553.9), so "<name> आपण सक्रिय सहभाग" reads as one line of the
-  // paragraph; centred in the space, short names would leave a wide gap before "आपण".
+  // Empty space before "आपण सक्रिय सहभाग" (this design has no rule there), from x 318 to one word space before
+  // "आपण" (x 733.5). The name is centred in that space, as on the earlier certificates, on that sentence's baseline
+  // (553.9) so it reads as part of the paragraph.
   // Mukta at 21.2 pt has the same letter height as the sentence's Utsaah Bold at 27.82 pt (Utsaah is drawn small for
   // its point size); the name is 10 % larger (23.3 pt) so it stands out.
   // Long names first get smaller down to minSize, then narrower down to minScaling %, and only names far beyond
@@ -62,8 +62,8 @@ function fitToLine(widthAt, { width, size, minSize, minScaling }) {
   return { size: s, scaling, width: widthAt(s, scaling) };
 }
 
-// Left edge of the fitted name: it ends where the name space ends, just before "आपण"
-const nameStart = (fit) => TEMPLATE.nameLine.x + TEMPLATE.nameLine.width - fit.width;
+// Left edge of the fitted name: centred in the name space before "आपण"
+const nameStart = (fit) => TEMPLATE.nameLine.x + (TEMPLATE.nameLine.width - fit.width) / 2;
 
 // Everything printed on the certificate besides the artwork, in one place for the PDF and the image
 function printedText(cert) {
@@ -114,8 +114,8 @@ function drawPage(doc, cert, photo) {
   const text = printedText(cert);
   doc.image(templateImage(doc), 0, 0, { width: t.width, height: t.height });
 
-  // Name right before "आपण सक्रिय सहभाग", a little larger than the sentence around it; long names are fitted to the
-  // space.
+  // Name centred in the space before "आपण सक्रिय सहभाग", a little larger than the sentence around it; long names are
+  // fitted to the space.
   // Narrowing is a transform, not pdfkit's horizontalScaling: pdfkit re-positions Devanagari text after every
   // positioned vowel sign without that scaling, which would leave gaps and push the name past the line.
   const { name } = cert;

@@ -39,4 +39,21 @@ describe("certificate layout", () => {
     const pdf = await renderCertificatePdf(cert);
     assert.equal(pdf.subarray(0, 5).toString(), "%PDF-");
   });
+
+  test("a short name is centred in the space before \"आपण सक्रिय सहभाग\", not pushed against it", async () => {
+    const image = await renderCertificateImage({ ...cert, name: "प्रज्ञा रोडे" });
+    // x 318–728 pt, y 530–562 pt at 2×: the name's space, centre x 523 pt
+    const box = { left: 636, top: 1060, width: 820, height: 64 };
+    const area = (input) => sharp(input).resize(2400, 1712, { fit: "fill" }).extract(box).greyscale().raw().toBuffer();
+    const [printed, blank] = await Promise.all([area(image), area(template)]);
+    let [minX, maxX] = [Infinity, -Infinity];
+    for (let i = 0; i < printed.length; i++) {
+      if (Math.abs(printed[i] - blank[i]) > 64) {
+        const x = i % box.width;
+        [minX, maxX] = [Math.min(minX, x), Math.max(maxX, x)];
+      }
+    }
+    const centrePt = (box.left + (minX + maxX) / 2) / 2;
+    assert.ok(Math.abs(centrePt - 523) < 8, `name centred at x ${centrePt.toFixed(1)} pt, expected about 523`);
+  });
 });
