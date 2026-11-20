@@ -11,6 +11,8 @@ export const paths = {
   privateStorage: process.env.ORIGINALS_DIR || path.join(root, "storage", "originals"),
   // Shivdurg Bhushan award evidence (local storage driver) — private, served only to authorised admins
   awardDocuments: process.env.AWARD_DOCUMENTS_DIR || path.join(root, "storage", "award-documents"),
+  // Sheets and photo archives uploaded for a bulk import, removed once the import has run. IMPORTS_DIR moves them
+  imports: process.env.IMPORTS_DIR || path.join(root, "storage", "imports"),
   certificateAssets: path.join(root, "assets", "certificate"),
   migrations: path.join(root, "migrations"),
 };

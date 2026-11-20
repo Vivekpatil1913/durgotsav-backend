@@ -20,6 +20,7 @@ yarn-error.log*
 storage/originals/*
 !storage/originals/.gitkeep
 storage/award-documents/
+storage/imports/
 
 # Images the app writes (registration copies, admin uploads). Files committed before
 # this rule stay tracked; new ones are not committed — each server keeps its own.

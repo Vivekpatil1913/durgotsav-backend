@@ -93,7 +93,7 @@ export function dhashProbeKeys(hex) {
  * Whether a candidate's registration is still live is one primary-key probe per remaining candidate (a scalar
  * subquery), so the planner never joins the candidates to the whole registrations table.
  */
-async function findDuplicatePhoto(photo, registrationId) {
+export async function findDuplicatePhoto(photo, registrationId) {
   const exact = await query(
     `SELECT p.id FROM registration_photos p
      JOIN registrations r ON r.id = p.registration_id AND r.deleted_at IS NULL
@@ -156,7 +156,7 @@ async function lockedExactDuplicates(client, photos, registrationId) {
 
 // After a failed transaction: were the rows saved after all (the COMMIT reply lost on the way)? Then the stored photos
 // belong to them and must stay. If even this cannot be checked, they stay too — a stray file is cheaper than a lost photo.
-const savedAfterAll = (sql, params) => query(sql, params).then((r) => r.rowCount > 0, () => true);
+export const savedAfterAll = (sql, params) => query(sql, params).then((r) => r.rowCount > 0, () => true);
 
 async function assertReferences({ district_id, taluka_id, fort_id }) {
   const [d, t, f] = await Promise.all([
@@ -207,7 +207,7 @@ async function uploadOriginalToS3(registration, prepared, after = 0) {
   }
 }
 
-async function savePhoto(registration, prepared, written, after = 0) {
+export async function savePhoto(registration, prepared, written, after = 0) {
   const copies = await writePublicCopies(prepared);
   written.files.push(...copies.files);
   let original;
@@ -233,9 +233,9 @@ async function savePhoto(registration, prepared, written, after = 0) {
   };
 }
 
-const newWritten = () => ({ files: [], keys: [] });
+export const newWritten = () => ({ files: [], keys: [] });
 
-async function discardWritten(written) {
+export async function discardWritten(written) {
   await removeFiles(written.files);
   for (const key of written.keys) {
     await deleteObject(key).catch((err) => logger.error({ key, code: err.code }, "S3: could not remove an orphaned upload"));

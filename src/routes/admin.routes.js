@@ -20,6 +20,7 @@ import { adminsRouter } from "../modules/auth/auth.module.js";
 import { rbacRouter } from "../modules/rbac/rbac.module.js";
 import { istDateTime } from "../modules/award/award.export.js";
 import { adminAwardRouter } from "../modules/award/award.routes.js";
+import { importRouter } from "../modules/imports/import.routes.js";
 import * as registrations from "../modules/registrations/registrations.service.js";
 import { wakeRejectionEmails } from "../modules/registrations/rejection-emails.js";
 import {
@@ -289,6 +290,8 @@ reg.post("/:id/restore",
     res.json({ data: await registrations.adminDetail(req.params.id, req.allowedDivisionIds) });
   }));
 
+// Bulk import (Excel / CSV + optional photo ZIP) — before reg, whose "/:id" would take "imports"
+router.use("/registrations/imports", importRouter);
 router.use("/registrations", reg);
 
 // ------------------------------------------------------------- certificates

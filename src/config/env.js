@@ -77,6 +77,17 @@ const schema = z.object({
   CAPTCHA_SITE_KEY: z.string().trim().default(""),
   CAPTCHA_SECRET_KEY: z.string().trim().default(""),
 
+  // Bulk registration import (Admin → Registrations → Import Excel). Rows are processed in batches of IMPORT_BATCH_SIZE
+  // (one bulk insert + one transaction each); IMPORT_PHOTO_CONCURRENCY photos are downloaded / resized at once.
+  IMPORT_BATCH_SIZE: z.coerce.number().int().min(10).max(5000).default(500),
+  IMPORT_PHOTO_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(4),
+  // Largest sheet (.xlsx / .csv) and photo archive (.zip) accepted, in MB (nginx client_max_body_size must allow them)
+  IMPORT_SHEET_MAX_MB: z.coerce.number().int().min(1).max(1024).default(200),
+  IMPORT_ZIP_MAX_MB: z.coerce.number().int().min(1).max(20480).default(2048),
+  // Photo URLs that resolve to private / loopback / link-local addresses are refused (no reaching the EC2 metadata
+  // service or internal hosts from a sheet). true only for local testing.
+  IMPORT_ALLOW_PRIVATE_PHOTO_URLS: bool,
+
   // Participant originals: "s3" (private bucket, EC2 instance role) or "local" (storage/originals, dev/tests)
   PARTICIPANT_IMAGE_STORAGE: z.enum(["s3", "local"]).default("local"),
   AWS_REGION: z.string().trim().default("ap-south-1"),
