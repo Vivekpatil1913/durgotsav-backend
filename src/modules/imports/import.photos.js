@@ -17,7 +17,42 @@ const tooLarge = () => new PhotoError(`Photo is larger than ${env.UPLOAD_MAX_MB}
 // ---------------------------------------------------------------- URL download
 
 const DOWNLOAD_TIMEOUT_MS = 20_000;
-const MAX_REDIRECTS = 3;
+// Google Drive answers uc?export=download with 303 → drive.usercontent.google.com, sometimes one more hop
+const MAX_REDIRECTS = 5;
+const USER_AGENT = "Mozilla/5.0 (compatible; AmrutDurgotsavImport/1.0; +https://amrutdurgotsav.com)";
+
+export const DRIVE_PRIVATE = "Google Drive link is private or invalid — set file access to 'Anyone with the link'";
+
+// ---------------------------------------------------------------- Google Drive share links
+
+const DRIVE_ID = /^[A-Za-z0-9_-]{10,}$/;
+const DRIVE_HOSTS = new Set(["drive.google.com", "docs.google.com", "drive.usercontent.google.com"]);
+
+/**
+ * The file id of a Google Drive share link, or null for any other URL. Accepted forms:
+ *   https://drive.google.com/file/d/<ID>/view?usp=sharing   (also /edit, /preview, /u/0/file/d/<ID>)
+ *   https://drive.google.com/open?id=<ID>
+ *   https://drive.google.com/uc?id=<ID>&export=view|download
+ *   https://drive.usercontent.google.com/download?id=<ID>
+ */
+export function driveFileId(rawUrl) {
+  let url;
+  try {
+    url = new URL(String(rawUrl).trim());
+  } catch {
+    return null;
+  }
+  if (!DRIVE_HOSTS.has(url.hostname.toLowerCase())) return null;
+  const fromPath = /\/file(?:\/u\/\d+)?\/d\/([^/?#]+)/.exec(url.pathname)?.[1];
+  const id = fromPath ?? url.searchParams.get("id");
+  return id && DRIVE_ID.test(id) ? id : null;
+}
+
+/** A Drive share link as its direct-download URL; any other URL unchanged. */
+export function directPhotoUrl(rawUrl) {
+  const id = driveFileId(rawUrl);
+  return id ? `https://drive.google.com/uc?export=download&id=${id}` : String(rawUrl).trim();
+}
 
 function isPrivateIPv4(ip) {
   const [a, b] = ip.split(".").map(Number);
@@ -55,7 +90,7 @@ function requestOnce(url) {
     const req = client.get(url, {
       lookup: guardedLookup,
       timeout: DOWNLOAD_TIMEOUT_MS,
-      headers: { "User-Agent": "AmrutDurgotsavImport/1.0", Accept: "image/*,*/*;q=0.5" },
+      headers: { "User-Agent": USER_AGENT, Accept: "image/avif,image/webp,image/png,image/jpeg,image/*;q=0.9,*/*;q=0.5" },
     }, resolve);
     req.on("timeout", () => req.destroy(Object.assign(new Error("timeout"), { code: "TIMEOUT" })));
     req.on("error", reject);
@@ -84,8 +119,22 @@ function readBody(res, limit) {
   });
 }
 
-/** The image bytes at a public http(s) URL, following up to 3 redirects. Throws PhotoError with a reason for the report. */
+// Content types a server may give an image file without naming it: the bytes are then checked by
+// prepareParticipantPhoto (S3 objects uploaded without a type are application/octet-stream; Drive sometimes says binary)
+const UNTYPED = new Set(["", "application/octet-stream", "binary/octet-stream", "application/binary", "application/x-binary"]);
+
+/**
+ * The image bytes behind a photo URL (a Google Drive share link is first turned into its direct-download URL),
+ * following up to 5 redirects. The response must be an image (Content-Type image/*, or untyped bytes that are then
+ * checked) of at most UPLOAD_MAX_MB. Throws PhotoError with a reason for the import report.
+ */
 export async function downloadPhoto(rawUrl) {
+  const drive = Boolean(driveFileId(rawUrl));
+  return fetchImage(directPhotoUrl(rawUrl), { drive });
+}
+
+/** fetchImage(url, { drive }): drive = the URL came from a Google Drive share link (its failures get DRIVE_PRIVATE). */
+export async function fetchImage(rawUrl, { drive = false } = {}) {
   let url;
   try {
     url = new URL(rawUrl);
@@ -108,15 +157,24 @@ export async function downloadPhoto(rawUrl) {
       if (err.code === "ENOTFOUND" || err.code === "EAI_AGAIN") throw new PhotoError(`Photo URL host "${url.hostname}" was not found`);
       throw new PhotoError(`Photo could not be downloaded (${err.code ?? err.message})`);
     }
-    if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+    if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
       res.resume();
       if (hop >= MAX_REDIRECTS) throw new PhotoError("Photo URL redirects too many times");
       url = new URL(res.headers.location, url);
       continue;
     }
+    const type = String(res.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
     if (res.statusCode !== 200) {
       res.resume();
+      if (drive) throw new PhotoError(DRIVE_PRIVATE);
       throw new PhotoError(`Photo could not be downloaded (HTTP ${res.statusCode})`);
+    }
+    if (!type.startsWith("image/") && !UNTYPED.has(type)) {
+      res.resume();
+      // A Drive file still set to "Restricted" answers with Google's sign-in page
+      if (drive) throw new PhotoError(DRIVE_PRIVATE);
+      if (type === "text/html") throw new PhotoError("Photo URL opens a web page, not an image — use a direct link to the image file");
+      throw new PhotoError(`Photo URL is not an image (Content-Type ${type})`);
     }
     return readBody(res, photoLimitBytes());
   }

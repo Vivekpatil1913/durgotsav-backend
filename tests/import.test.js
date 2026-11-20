@@ -30,6 +30,10 @@ before(async () => {
   photos.set("/big.jpg", Buffer.alloc(6 * 1024 * 1024, 1));
   photoServer = http.createServer((req, res) => {
     if (req.url === "/moved.jpg") return res.writeHead(302, { Location: "/d.jpg" }).end();
+    if (req.url === "/drive-like") return res.writeHead(303, { Location: "/moved.jpg" }).end();
+    if (req.url === "/signin") return res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end("<html>Sign in</html>");
+    if (req.url === "/text") return res.writeHead(200, { "Content-Type": "text/plain" }).end("hello");
+    if (req.url === "/untyped.jpg") return res.writeHead(200, { "Content-Type": "application/octet-stream" }).end(photos.get("/a.jpg"));
     const body = photos.get(req.url);
     if (!body) return res.writeHead(404).end();
     res.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": body.length }).end(body);
@@ -225,3 +229,109 @@ describe("registration import", () => {
     assert.ok(res.body.data[0].id > res.body.data[1].id);
   });
 });
+
+describe("Google Drive links and photo downloads", () => {
+  test("share links become direct-download URLs; other URLs stay as they are", async () => {
+    const { directPhotoUrl, driveFileId } = await import("../src/modules/imports/import.photos.js");
+    const id = "1AbCdEfGhIjKlMnOpQrStUvWxYz_-0123";
+    const direct = `https://drive.google.com/uc?export=download&id=${id}`;
+    for (const link of [
+      `https://drive.google.com/file/d/${id}/view?usp=drive_link`,
+      `https://drive.google.com/file/d/${id}/view`,
+      `https://drive.google.com/file/u/0/d/${id}/edit`,
+      `https://drive.google.com/open?id=${id}`,
+      `https://drive.google.com/uc?id=${id}&export=view`,
+      `https://drive.google.com/uc?export=download&id=${id}`,
+      ` https://drive.google.com/file/d/${id}/view?usp=sharing `,
+    ]) assert.equal(directPhotoUrl(link), direct, link);
+    assert.equal(driveFileId("https://example.com/file/d/abcdefghijklmnop/view"), null);
+    assert.equal(driveFileId("https://drive.google.com/drive/folders/"), null);
+    assert.equal(directPhotoUrl("https://bucket.s3.amazonaws.com/p.jpg"), "https://bucket.s3.amazonaws.com/p.jpg");
+  });
+
+  test("downloads follow 301/302/303, need an image type, and explain a private Drive file", async () => {
+    const { DRIVE_PRIVATE, fetchImage } = await import("../src/modules/imports/import.photos.js");
+    const message = (p) => p.then(() => null, (e) => e.message);
+    assert.ok((await fetchImage(`${base}/drive-like`, { drive: true })).length > 1000, "303 → 302 → image");
+    assert.ok((await fetchImage(`${base}/untyped.jpg`)).length > 1000, "untyped bytes are accepted (checked as an image later)");
+    assert.equal(await message(fetchImage(`${base}/signin`, { drive: true })), DRIVE_PRIVATE);
+    assert.equal(await message(fetchImage(`${base}/missing.jpg`, { drive: true })), DRIVE_PRIVATE);
+    assert.match(await message(fetchImage(`${base}/signin`)), /web page, not an image/);
+    assert.match(await message(fetchImage(`${base}/text`)), /not an image \(Content-Type text\/plain\)/);
+  });
+
+  test("blank row 1, headers on row 2 with '*' and notes, hyperlink cells and Drive links", async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet("Participants");
+    ws.getRow(2).values = ["Sr. No.", "Full Name *", "Mobile Number *", "District *", "Photo URL (Direct Link)"];
+    const rows = [
+      [1, "Ganesh Kadam", "9222222221", "Pune", { text: "View photo", hyperlink: `${base}/a.jpg` }], // 3 inserted hyperlink
+      [2, "Lata Bhosale", "9222222222", "Kolhapur", { formula: `HYPERLINK("${base}/b.jpg","Photo")`, result: "Photo" }], // 4 formula
+      [3, "Drive Restricted", "9222222223", "Satara", "https://drive.google.com/file/d/1ThisFileIdDoesNotExist000000000/view?usp=drive_link"], // 5
+      [4, "Plain Url", "9222222224", "Sangli", `${base}/c.jpg`], // 6
+    ];
+    rows.forEach((r, i) => { ws.getRow(3 + i).values = r; });
+    const res = await upload(Buffer.from(await wb.xlsx.writeBuffer()), "row2-headers.xlsx");
+    assert.equal(res.status, 202, JSON.stringify(res.body));
+    const job = await finished(res.body.data.id);
+    assert.equal(job.status, "completed", job.error);
+    assert.equal(job.total_rows, 4);
+    const drive = reasonOf(job, 5);
+    // Needs internet: Google answers an unknown / restricted file with an HTML page
+    if (!/was not found|could not be downloaded \(E/.test(drive ?? "")) {
+      assert.equal(drive, "Google Drive link is private or invalid — set file access to 'Anyone with the link'");
+    }
+    assert.equal(job.imported_rows, 3);
+    const { rows: saved } = await pool.query(
+      `SELECT r.name, r.status, p.image_path, c.certificate_no FROM registrations r
+       JOIN registration_photos p ON p.registration_id = r.id AND p.is_current AND p.position = 1
+       JOIN certificates c ON c.registration_id = r.id
+       WHERE r.import_id = $1 ORDER BY r.id`, [job.id]);
+    assert.deepEqual(saved.map((r) => r.name), ["Ganesh Kadam", "Lata Bhosale", "Plain Url"]);
+    for (const r of saved) {
+      assert.equal(r.status, "verified");
+      assert.match(r.image_path, /^\/uploads\/registrations\//);
+    }
+  });
+
+  test("outside production, S3 without credentials keeps photo originals on local disk", async () => {
+    const { env } = await import("../src/config/env.js");
+    const { s3Transport } = await import("../src/services/s3.service.js");
+    const saved = { storage: env.PARTICIPANT_IMAGE_STORAGE, bucket: env.AWS_S3_BUCKET_NAME, send: s3Transport.send };
+    env.PARTICIPANT_IMAGE_STORAGE = "s3";
+    env.AWS_S3_BUCKET_NAME = "test-bucket";
+    s3Transport.send = async () => { throw Object.assign(new Error("Could not load credentials from any providers"), { name: "CredentialsProviderError" }); };
+    try {
+      const file = await xlsx(["Full Name", "Mobile Number", "District", "Photo URL"], [["Fallback Person", "9444444441", "Pune", `${base}/d.jpg`]]);
+      const job = await finished((await upload(file, "fallback.xlsx")).body.data.id);
+      assert.equal(job.imported_rows, 1, JSON.stringify(job.errors));
+      const { rows } = await pool.query(
+        "SELECT p.storage, p.original_path FROM registration_photos p JOIN registrations r ON r.id = p.registration_id WHERE r.import_id = $1", [job.id]);
+      assert.equal(rows[0].storage, "local");
+      assert.ok(rows[0].original_path);
+    } finally {
+      Object.assign(env, { PARTICIPANT_IMAGE_STORAGE: saved.storage, AWS_S3_BUCKET_NAME: saved.bucket });
+      s3Transport.send = saved.send;
+    }
+  });
+
+  test("a title banner above the header is skipped; no header in the first 10 rows is a clear error", async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet("S");
+    ws.getRow(1).values = ["Amrut Durgotsav 2026 — participant list"];
+    ws.getRow(3).values = ["Name", "Mobile", "Location (District) *", "Photo"];
+    ws.getRow(4).values = ["Banner Test", "9333333331", "Nagpur", ""];
+    const job = await finished((await upload(Buffer.from(await wb.xlsx.writeBuffer()), "banner.xlsx")).body.data.id);
+    assert.equal(job.status, "completed", job.error);
+    assert.equal(job.imported_rows, 1);
+
+    const late = new ExcelJS.Workbook();
+    const ls = late.addWorksheet("S");
+    ls.getRow(12).values = ["Full Name", "Mobile Number", "District"];
+    ls.getRow(13).values = ["Too Late", "9333333332", "Pune"];
+    const failed = await finished((await upload(Buffer.from(await late.xlsx.writeBuffer()), "late.xlsx")).body.data.id);
+    assert.equal(failed.status, "failed");
+    assert.match(failed.error, /No header row found in the first 10 rows/);
+  });
+});
+

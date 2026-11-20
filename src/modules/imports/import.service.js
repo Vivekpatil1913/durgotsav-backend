@@ -161,6 +161,25 @@ async function runImport(job) {
   }
 }
 
+// Outside production, an S3 bucket without credentials (a developer machine) must not fail every row: the import then
+// keeps originals on local disk (storage/originals), as PARTICIPANT_IMAGE_STORAGE=local does. Production needs S3.
+let s3Unavailable = false;
+async function storePhoto(owner, prepared, written) {
+  const local = env.PARTICIPANT_IMAGE_STORAGE !== "s3" || (s3Unavailable && !env.isProd);
+  try {
+    return await savePhoto(owner, prepared, written, 0, local ? "local" : "s3");
+  } catch (err) {
+    if (local || env.isProd || err.code !== "S3_CREDENTIALS_UNAVAILABLE") throw err;
+    s3Unavailable = true;
+    logger.warn("Import: S3 has no credentials — photo originals are kept on local disk (development only)");
+    // The failed attempt's WebP copies are written again with the local original
+    await discardWritten(written);
+    written.files.length = 0;
+    written.keys.length = 0;
+    return savePhoto(owner, prepared, written, 0, "local");
+  }
+}
+
 // Runs fn over items, at most `limit` at a time
 async function eachLimit(items, limit, fn) {
   let next = 0;
@@ -238,7 +257,7 @@ async function processBatch(ctx, rows) {
         const prepared = await prepareParticipantPhoto({
           buffer: bytes, size: bytes.length, originalname: c.source.file ?? c.source.url.split(/[?#]/)[0].split("/").pop(),
         });
-        c.photo = await savePhoto({ id: c.id, name: c.name, phone: c.phone }, prepared, c.written);
+        c.photo = await storePhoto({ id: c.id, name: c.name, phone: c.phone }, prepared, c.written);
         c.duplicateOf = await findDuplicatePhoto(c.photo, c.id);
       } catch (err) {
         c.error = photoReason(err);

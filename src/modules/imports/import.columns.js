@@ -10,38 +10,69 @@ const HEADER_ALIASES = {
   name: ["fullname", "name", "participantname", "participant", "नाव", "पूर्णनाव", "संपूर्णनाव"],
   phone: ["mobilenumber", "mobile", "mobileno", "phone", "phonenumber", "phoneno", "contactnumber", "contactno", "contact",
     "मोबाईलनंबर", "मोबाईल", "मोबाइल", "मोबाइलनंबर", "मोबाईलक्रमांक"],
-  district: ["district", "location", "districtname", "जिल्हा"],
-  photoUrl: ["photourl", "photo", "photolink", "imageurl", "image", "imagelink", "फोटो", "छायाचित्र"],
+  district: ["district", "location", "districtname", "locationdistrict", "districtlocation", "जिल्हा"],
+  photoUrl: ["photourl", "photo", "photolink", "imageurl", "image", "imagelink", "directlink", "photodirectlink",
+    "photourldirectlink", "drivelink", "googledrivelink", "photodrivelink", "फोटो", "छायाचित्र", "फोटोलिंक"],
   photoFile: ["photofilename", "photofile", "filename", "imagefilename", "imagefile", "imagename", "photoname"],
 };
 export const REQUIRED_FIELDS = { name: "Full Name", phone: "Mobile Number", district: "District" };
 
+// Case, spaces, punctuation and a trailing "*" (mandatory marker) are ignored
 const normalizeHeader = (text) => String(text ?? "").toLowerCase().replace(/[^\p{L}\p{M}\p{N}]/gu, "");
 const HEADER_LOOKUP = new Map(Object.entries(HEADER_ALIASES).flatMap(([field, names]) => names.map((n) => [n, field])));
 
 /**
- * Column index of each field in the header row (cells: array of header texts). Unknown columns are ignored; the first
- * column of a field wins. Throws a message for the admin when a mandatory column is missing.
+ * The field a header names, or undefined. Tried in turn: the whole header ("Full Name *"), the header without its
+ * bracketed note ("Location (District) *" → "Location", "Photo URL (Direct Link)" → "Photo URL"), and the note alone
+ * ("Name (पूर्ण नाव)" → "पूर्ण नाव").
  */
-export function mapHeader(cells) {
+export function headerField(text) {
+  const raw = String(text ?? "").trim();
+  const inside = [...raw.matchAll(/\(([^)]*)\)/g)].map((m) => m[1]);
+  for (const candidate of [raw, raw.replace(/\([^)]*\)/g, " "), ...inside]) {
+    const field = HEADER_LOOKUP.get(normalizeHeader(candidate));
+    if (field) return field;
+  }
+  return undefined;
+}
+
+/**
+ * Column index of each field in a row of header texts (unknown columns, e.g. "Sr. No.", ignored; the first column of a
+ * field wins) and the mandatory fields it lacks.
+ */
+export function matchHeader(cells) {
   const columns = {};
   cells.forEach((cell, index) => {
-    const field = HEADER_LOOKUP.get(normalizeHeader(cell));
+    const field = headerField(cell);
     if (field && columns[field] === undefined) columns[field] = index;
   });
   const missing = Object.entries(REQUIRED_FIELDS).filter(([field]) => columns[field] === undefined).map(([, label]) => label);
-  if (missing.length) {
-    throw new ImportFileError(`The sheet has no ${missing.join(", ")} column. The first row must hold the column names: ${TEMPLATE_COLUMNS.join(", ")} (download the sample template)`);
-  }
+  return { columns, missing };
+}
+
+/** Like matchHeader, but throws a message for the admin when a mandatory column is missing. */
+export function mapHeader(cells) {
+  const { columns, missing } = matchHeader(cells);
+  if (missing.length) throw missingColumns(missing);
   return columns;
 }
+
+export const missingColumns = (missing) => new ImportFileError(
+  `The sheet has no ${missing.join(", ")} column. One of the first ${HEADER_SCAN_ROWS} rows must hold the column names: ${TEMPLATE_COLUMNS.join(", ")} (download the sample template)`,
+);
+
+// The header row is looked for among the sheet's first rows (above it: blank rows, a title banner, notes)
+export const HEADER_SCAN_ROWS = 10;
 
 // The whole import cannot run (unreadable file, missing columns): shown to the admin as the import's error
 export class ImportFileError extends Error {}
 
 // ---------------------------------------------------------------- cell values
 
-/** A cell's value as trimmed text, whatever Excel stored (number, rich text, hyperlink, formula result, date). */
+/**
+ * A cell's value as trimmed text, whatever Excel stored (number, rich text, formula result, date). For a cell with a
+ * hyperlink this is the text shown in the cell; cellLink() gives the link.
+ */
 export function cellText(value) {
   if (value === null || value === undefined) return "";
   if (typeof value === "string") return value.trim();
@@ -51,11 +82,19 @@ export function cellText(value) {
   if (typeof value === "object") {
     if (Array.isArray(value.richText)) return value.richText.map((r) => r.text ?? "").join("").trim();
     if ("result" in value) return cellText(value.result);
-    if ("hyperlink" in value) return cellText(value.hyperlink || value.text);
+    if ("hyperlink" in value) return cellText(value.text) || cellText(value.hyperlink);
     if ("text" in value) return cellText(value.text);
     if ("error" in value) return "";
   }
   return String(value).trim();
+}
+
+/**
+ * A URL in a cell: the cell's hyperlink target when it has one (clickable text such as "View photo"), otherwise its text.
+ */
+export function cellLink(value) {
+  if (value && typeof value === "object" && !Array.isArray(value) && value.hyperlink) return String(value.hyperlink).trim();
+  return cellText(value);
 }
 
 // ---------------------------------------------------------------- field rules

@@ -207,11 +207,13 @@ async function uploadOriginalToS3(registration, prepared, after = 0) {
   }
 }
 
-export async function savePhoto(registration, prepared, written, after = 0) {
+// storage: where the original goes — PARTICIPANT_IMAGE_STORAGE unless the caller decides otherwise (the bulk import keeps
+// originals on local disk in development when S3 has no credentials)
+export async function savePhoto(registration, prepared, written, after = 0, storage = env.PARTICIPANT_IMAGE_STORAGE) {
   const copies = await writePublicCopies(prepared);
   written.files.push(...copies.files);
   let original;
-  if (env.PARTICIPANT_IMAGE_STORAGE === "s3") {
+  if (storage === "s3") {
     original = await uploadOriginalToS3(registration, prepared, after);
     written.keys.push(original.storage_key);
   } else {

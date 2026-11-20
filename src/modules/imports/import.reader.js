@@ -2,7 +2,9 @@
 // .csv through a small streaming parser. Memory stays flat whether the sheet has 150 rows or millions. Only text is
 // read — photos are given as URLs or ZIP file names, never embedded in the workbook.
 import fs from "node:fs";
-import { cellText, ImportFileError, mapHeader } from "./import.columns.js";
+import {
+  cellLink, cellText, HEADER_SCAN_ROWS, ImportFileError, matchHeader, missingColumns, TEMPLATE_COLUMNS,
+} from "./import.columns.js";
 import { xlsxRows } from "./xlsx.stream.js";
 
 export const SHEET_TYPES = { ".xlsx": "xlsx", ".csv": "csv" };
@@ -91,21 +93,34 @@ const rawRows = (file, type) => (type === "csv" ? csvRawRows(file) : xlsxRawRows
 const isBlank = (cells) => cells.every((c) => cellText(c) === "");
 
 /**
- * The sheet's data rows: { rowNo, name, phone, district, photoUrl, photoFile } as trimmed text (rowNo as Excel shows it,
- * header = row 1). The header is the first non-empty row; empty rows are skipped.
+ * The sheet's data rows: { rowNo, name, phone, district, photoUrl, photoFile } as trimmed text (rowNo as Excel shows
+ * it). The header row is found among the first HEADER_SCAN_ROWS rows — the first row naming every mandatory column —
+ * so blank rows, a title banner or notes above it are skipped; empty rows are skipped everywhere. Photo URL is the
+ * cell's hyperlink target when the cell shows clickable text.
  */
 export async function* readRows(file, type) {
   let columns = null;
+  let best = null; // the header-like row matching most columns, for the error message
   for await (const { rowNo, cells } of rawRows(file, type)) {
     if (isBlank(cells)) continue;
     if (!columns) {
-      columns = mapHeader(cells.map(cellText));
+      if (rowNo > HEADER_SCAN_ROWS) break;
+      const match = matchHeader(cells.map(cellText));
+      if (!match.missing.length) {
+        columns = match.columns;
+      } else if (Object.keys(match.columns).length && (!best || Object.keys(match.columns).length > Object.keys(best.columns).length)) {
+        best = match;
+      }
       continue;
     }
     const at = (field) => (columns[field] === undefined ? "" : cellText(cells[columns[field]]));
-    yield { rowNo, name: at("name"), phone: at("phone"), district: at("district"), photoUrl: at("photoUrl"), photoFile: at("photoFile") };
+    const link = (field) => (columns[field] === undefined ? "" : cellLink(cells[columns[field]]));
+    yield { rowNo, name: at("name"), phone: at("phone"), district: at("district"), photoUrl: link("photoUrl"), photoFile: at("photoFile") };
   }
-  if (!columns) throw new ImportFileError("The sheet is empty. Add the column names in the first row and one participant per row");
+  if (!columns) {
+    if (best) throw missingColumns(best.missing);
+    throw new ImportFileError(`No header row found in the first ${HEADER_SCAN_ROWS} rows. Add the column names (${TEMPLATE_COLUMNS.join(", ")}) above the participants (download the sample template)`);
+  }
 }
 
 /** Data rows in the sheet (a first, quick pass, so the progress bar knows the total). */
