@@ -169,7 +169,7 @@ describe("certificate email queue", () => {
        FROM certificates c JOIN registrations r ON r.id = c.registration_id
        JOIN registration_photos p ON p.registration_id = r.id AND p.is_current AND p.position = 1`);
     const photos = new Map();
-    for (const c of rows) photos.set(c.registration_id, await loadAsJpeg(c.image_path, 483, 231, "attention"));
+    for (const c of rows) photos.set(c.registration_id, await loadAsJpeg(c.image_path, 161 * 4, 137.5 * 4, "centre", "contain"));
 
     for (const c of rows) {
       const mails = box.sent.filter((m) => m.to === c.email);

@@ -28,15 +28,16 @@ The sample template (`GET /api/admin/registrations/imports/template.xlsx`) has t
 `drive.google.com/file/d/<ID>/view…`, `drive.google.com/open?id=<ID>` and `drive.google.com/uc?id=<ID>…` are turned
 into `https://drive.google.com/uc?export=download&id=<ID>` and downloaded following redirects. The response must be an
 image (`Content-Type: image/*`; untyped `application/octet-stream` bytes are accepted and then checked as images) of at
-most `UPLOAD_MAX_MB` (5 MB). A Drive file that is not shared as *Anyone with the link* answers with an HTML sign-in page;
+most `UPLOAD_MAX_MB` (20 MB). A Drive file that is not shared as *Anyone with the link* answers with an HTML sign-in page;
 that row fails with *"Google Drive link is private or invalid — set file access to 'Anyone with the link'"*.
 
 ### Photo storage
 
-Downloaded photos go through the same code as a website upload: checked and resized (`prepareParticipantPhoto`), public
-WebP copies in `uploads/registrations/…` (the certificate uses this image, `registration_photos.image_path`), and the
-original in S3 (`PARTICIPANT_IMAGE_STORAGE=s3`) or `storage/originals` (`local`). Outside production, when S3 has no
-credentials, the import keeps originals on local disk instead of failing every row; production requires S3.
+Downloaded photos go through the same code as a website upload: checked and resized (`prepareParticipantPhoto`), with the
+original and its WebP copies (the certificate uses `registration_photos.image_path`) in S3 (`PARTICIPANT_IMAGE_STORAGE=s3`,
+see [image-storage.md](image-storage.md)) or in `storage/originals` and `uploads/registrations/…` (`local`). Outside
+production, when S3 has no credentials, the import keeps them on local disk instead of failing every row; production
+requires S3.
 
 ## Processing
 

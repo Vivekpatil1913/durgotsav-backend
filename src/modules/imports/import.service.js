@@ -7,8 +7,8 @@
  *   1. validate each row (mandatory fields, 10-digit mobile, Maharashtra district, the admin's division scope);
  *   2. skip people already registered (same mobile number AND same name — one number may hold several registrations,
  *      as on the website) and repeats within the batch;
- *   3. fetch, check and store each photo exactly like a website upload (prepareParticipantPhoto + savePhoto: WebP copies,
- *      original to S3 or local storage, duplicate-photo check), IMPORT_PHOTO_CONCURRENCY at a time;
+ *   3. fetch, check and store each photo exactly like a website upload (prepareParticipantPhoto + savePhoto: WebP copies
+ *      and original to S3 or local storage, duplicate-photo check), IMPORT_PHOTO_CONCURRENCY at a time;
  *   4. one short transaction per batch: a bulk insert of the registrations as "verified" (approved) and their photos,
  *      then the certificates, certificate emails and SMS exactly as an admin's approval does (certificates.issueBatch,
  *      queueEmails, sms.enqueue). The background workers render and deliver them.
@@ -172,7 +172,7 @@ async function storePhoto(owner, prepared, written) {
     if (local || env.isProd || err.code !== "S3_CREDENTIALS_UNAVAILABLE") throw err;
     s3Unavailable = true;
     logger.warn("Import: S3 has no credentials — photo originals are kept on local disk (development only)");
-    // The failed attempt's WebP copies are written again with the local original
+    // The photo is stored again, all of it on local disk
     await discardWritten(written);
     written.files.length = 0;
     written.keys.length = 0;

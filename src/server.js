@@ -31,12 +31,17 @@ const server = app.listen(env.PORT, () => {
     logger.warn(`CAPTCHA_PROVIDER=${env.CAPTCHA_PROVIDER} — the "I am not a robot" box is not checked by Google or Cloudflare, so it does not stop scripted submissions`);
   }
   if (env.PARTICIPANT_IMAGE_STORAGE === "s3") {
-    logger.info(`Participant photo originals → s3://${env.AWS_S3_BUCKET_NAME} (${env.AWS_REGION})`);
+    logger.info(`Photos and thumbnails → s3://${env.AWS_S3_BUCKET_NAME} (${env.AWS_REGION})`);
     checkS3Credentials();
   } else {
-    logger.warn("PARTICIPANT_IMAGE_STORAGE=local — participant originals are kept in storage/originals, not S3");
+    logger[env.isProd ? "error" : "warn"]("PARTICIPANT_IMAGE_STORAGE=local — photos and thumbnails are kept on THIS server's disk, not in S3: "
+      + "another server, or this one after a rebuild, will not have them");
   }
 });
+
+// Node drops a request that has not fully arrived after 5 minutes, which cut off large import archives (up to
+// IMPORT_ZIP_MAX_MB) and photos sent over slow mobile connections. Headers still have to arrive within a minute.
+server.requestTimeout = 30 * 60_000;
 
 async function shutdown(signal) {
   logger.info(`${signal} received, shutting down`);

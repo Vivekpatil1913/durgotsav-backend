@@ -1,5 +1,5 @@
 // Where an imported row's photo comes from: a public URL (S3 or any direct image link) or a file in the uploaded ZIP.
-// Either way at most the configured upload limit (UPLOAD_MAX_MB, 5 MB) is read; the bytes are then checked and resized
+// Either way at most the configured upload limit (UPLOAD_MAX_MB) is read; the bytes are then checked and resized
 // by the same code as a photo uploaded on the website (prepareParticipantPhoto).
 import dns from "node:dns";
 import http from "node:http";
@@ -16,7 +16,8 @@ const tooLarge = () => new PhotoError(`Photo is larger than ${env.UPLOAD_MAX_MB}
 
 // ---------------------------------------------------------------- URL download
 
-const DOWNLOAD_TIMEOUT_MS = 20_000;
+const DOWNLOAD_TIMEOUT_MS = 20_000; // without a byte arriving
+const DOWNLOAD_TOTAL_MS = 120_000; // for the whole photo, so a trickling server cannot hold up the import
 // Google Drive answers uc?export=download with 303 → drive.usercontent.google.com, sometimes one more hop
 const MAX_REDIRECTS = 5;
 const USER_AGENT = "Mozilla/5.0 (compatible; AmrutDurgotsavImport/1.0; +https://amrutdurgotsav.com)";
@@ -106,6 +107,11 @@ function readBody(res, limit) {
     }
     const chunks = [];
     let size = 0;
+    const deadline = setTimeout(() => {
+      res.destroy();
+      reject(new PhotoError("Photo took too long to download"));
+    }, DOWNLOAD_TOTAL_MS);
+    res.on("close", () => clearTimeout(deadline));
     res.on("data", (chunk) => {
       size += chunk.length;
       if (size > limit) {

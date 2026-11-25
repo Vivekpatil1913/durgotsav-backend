@@ -1,4 +1,4 @@
-// Amazon S3 access for private participant originals.
+// Amazon S3 access: private participant originals and their display copies and thumbnails (media.service.js).
 // Credentials come from the AWS SDK default provider chain — on EC2 that is the instance role (IMDS).
 // No access keys are read or passed here, and credentials are never logged.
 import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
@@ -64,6 +64,28 @@ export async function putObjectIfAbsent({ key, body, contentType, metadata }) {
     // 412: an object exists; 409: a concurrent conditional write to the same key is in flight
     if (err?.name === "PreconditionFailed" || [409, 412].includes(httpStatus(err))) throw new ObjectExistsError(key);
     throw operationalError(err, "s3:PutObject", key);
+  }
+}
+
+// Unconditional upload, for keys that are random and never reused (display copies and thumbnails)
+export async function putObject({ key, body, contentType, cacheControl }) {
+  try {
+    await s3Transport.send(new PutObjectCommand({
+      Bucket: bucket(), Key: key, Body: body, ContentType: contentType, CacheControl: cacheControl,
+    }));
+  } catch (err) {
+    throw operationalError(err, "s3:PutObject", key);
+  }
+}
+
+// The object at key (its Body is a stream), or null when there is none. Without s3:ListBucket on the bucket, S3 answers
+// 403 instead of 404 for a missing object, which cannot be told apart from a missing permission and throws.
+export async function getObject(key) {
+  try {
+    return await s3Transport.send(new GetObjectCommand({ Bucket: bucket(), Key: key }));
+  } catch (err) {
+    if (err?.name === "NoSuchKey" || err?.name === "NotFound" || httpStatus(err) === 404) return null;
+    throw operationalError(err, "s3:GetObject", key);
   }
 }
 

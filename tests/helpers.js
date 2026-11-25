@@ -20,6 +20,7 @@ process.env.UPLOADS_DIR = path.join(os.tmpdir(), "durgotsav-test-uploads");
 process.env.ORIGINALS_DIR = path.join(os.tmpdir(), "durgotsav-test-originals");
 process.env.PARTICIPANT_IMAGE_STORAGE = "local"; // never reach AWS; s3-storage.test.js switches to a fake S3
 process.env.AWARD_DOCUMENT_STORAGE = "local"; // never reach AWS; award.test.js switches to a fake S3 where it needs one
+process.env.UPLOAD_MAX_MB = "20"; // whatever this machine's .env says
 process.env.CAPTCHA_PROVIDER = "off"; // srs-v2.test.js switches it on against a stubbed provider
 process.env.SMS_DRIVER = "log"; // never reach an SMS gateway
 
@@ -35,7 +36,10 @@ export async function resetDatabase() {
   await admin.query(`CREATE DATABASE "${process.env.DB_NAME}" ENCODING 'UTF8' TEMPLATE template0`);
   await admin.end();
   for (const script of ["scripts/migrate.js", "seeders/index.js"]) {
-    execFileSync(process.execPath, [script], { cwd: root, env: process.env, stdio: "pipe" });
+    execFileSync(process.execPath, [script], {
+      // Seeding runs in its own process, which a test's fake S3 does not reach
+      cwd: root, env: { ...process.env, PARTICIPANT_IMAGE_STORAGE: "local" }, stdio: "pipe",
+    });
   }
 }
 

@@ -1,6 +1,7 @@
 import { env } from "../../config/env.js";
 import { query, withTransaction } from "../../db/pool.js";
-import { prepareParticipantPhoto, removeFiles, writeLocalOriginal, writePublicCopies } from "../../services/image.service.js";
+import { prepareParticipantPhoto, removeFiles, writeLocalOriginal } from "../../services/image.service.js";
+import { writeCopies } from "../../services/media.service.js";
 import { istDateFolder, participantFolderName, photoObjectKey } from "../../services/participant-photo-keys.js";
 import { deleteObject, objectMetadata, ObjectExistsError, presignGetUrl, putObjectIfAbsent } from "../../services/s3.service.js";
 import { logger } from "../../utils/logger.js";
@@ -207,20 +208,28 @@ async function uploadOriginalToS3(registration, prepared, after = 0) {
   }
 }
 
-// storage: where the original goes — PARTICIPANT_IMAGE_STORAGE unless the caller decides otherwise (the bulk import keeps
-// originals on local disk in development when S3 has no credentials)
-export async function savePhoto(registration, prepared, written, after = 0, storage = env.PARTICIPANT_IMAGE_STORAGE) {
-  const copies = await writePublicCopies(prepared);
-  written.files.push(...copies.files);
-  let original;
+async function saveOriginal(registration, prepared, written, after, storage) {
   if (storage === "s3") {
-    original = await uploadOriginalToS3(registration, prepared, after);
+    const original = await uploadOriginalToS3(registration, prepared, after);
     written.keys.push(original.storage_key);
-  } else {
-    const local = await writeLocalOriginal(prepared);
-    written.files.push(local.file);
-    original = { storage: "local", original_path: local.original_path };
+    return original;
   }
+  const local = await writeLocalOriginal(prepared);
+  written.files.push(local.file);
+  return { storage: "local", original_path: local.original_path };
+}
+
+// storage: where the original and its display copies go — PARTICIPANT_IMAGE_STORAGE unless the caller decides otherwise
+// (the bulk import keeps them on local disk in development when S3 has no credentials). Original and copies are stored
+// at the same time; if either fails, both have ended before this rejects, so discardWritten() sees everything.
+export async function savePhoto(registration, prepared, written, after = 0, storage = env.PARTICIPANT_IMAGE_STORAGE) {
+  const results = await Promise.allSettled([
+    writeCopies(prepared, written, storage),
+    saveOriginal(registration, prepared, written, after, storage),
+  ]);
+  const failed = results.find((r) => r.status === "rejected");
+  if (failed) throw failed.reason;
+  const [copies, original] = results.map((r) => r.value);
   return {
     ...original,
     image_path: copies.image_path,

@@ -28,7 +28,7 @@ const schema = z.object({
   JWT_EXPIRES_IN: z.string().default("8h"),
 
   ALBUM_PAGE_SIZE: z.coerce.number().int().min(1).max(100).default(20),
-  UPLOAD_MAX_MB: z.coerce.number().min(1).max(25).default(5),
+  UPLOAD_MAX_MB: z.coerce.number().min(1).max(25).default(20),
   REGISTRATION_FORCE_OPEN: bool,
   // Registrations processed at the same time per API process (photo in memory + image work); more wait in a queue of
   // REGISTRATION_QUEUE, beyond which the API answers 503 "try again" instead of running out of memory
@@ -88,7 +88,8 @@ const schema = z.object({
   // service or internal hosts from a sheet). true only for local testing.
   IMPORT_ALLOW_PRIVATE_PHOTO_URLS: bool,
 
-  // Participant originals: "s3" (private bucket, EC2 instance role) or "local" (storage/originals, dev/tests)
+  // Participant originals, their display copies and thumbnails: "s3" (private bucket, EC2 instance role) or "local"
+  // (storage/originals and uploads/ of this one machine, dev/tests)
   PARTICIPANT_IMAGE_STORAGE: z.enum(["s3", "local"]).default("local"),
   AWS_REGION: z.string().trim().default("ap-south-1"),
   AWS_S3_BUCKET_NAME: z.string().trim().default(""),

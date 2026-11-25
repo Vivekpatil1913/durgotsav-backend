@@ -27,7 +27,7 @@ before(async () => {
   imports = await import("../src/modules/imports/import.service.js");
   token = (await request(app).post("/api/auth/login").send(ADMIN)).body.token;
   for (const name of ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]) photos.set(`/${name}`, await makePhoto());
-  photos.set("/big.jpg", Buffer.alloc(6 * 1024 * 1024, 1));
+  photos.set("/big.jpg", Buffer.alloc(21 * 1024 * 1024, 1));
   photoServer = http.createServer((req, res) => {
     if (req.url === "/moved.jpg") return res.writeHead(302, { Location: "/d.jpg" }).end();
     if (req.url === "/drive-like") return res.writeHead(303, { Location: "/moved.jpg" }).end();
@@ -118,7 +118,7 @@ describe("registration import", () => {
     assert.match(reasonOf(job, 6), /not a Maharashtra district/);
     assert.match(reasonOf(job, 7), /Repeats an earlier row/);
     assert.match(reasonOf(job, 8), /HTTP 404/);
-    assert.match(reasonOf(job, 10), /larger than 5 MB/);
+    assert.match(reasonOf(job, 10), /larger than 20 MB/);
     assert.match(reasonOf(job, 12), /http:\/\/ or https:\/\//);
 
     const { rows } = await pool.query(
